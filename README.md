@@ -1,9 +1,10 @@
 # code_auditor
 Automated code audit and optimization.
-
+```
 =====================================================================
           GEMINI CODE QUALITY AUDITOR (v2.0) - README FILE
 =====================================================================
+```
 
 1. DESCRIPTION
 --------------
