@@ -186,27 +186,20 @@ class W3CValidator(BaseValidator):
 class GeminiValidator(BaseValidator):
     """Модуль интеллектуального анализа (AI)"""
 
-    def __init__(self, config):
-        self.api_key = config['gemini_key']
-        self.model_name = config['gemini_model']
-        self.system_instruction = "You are a Senior QA Engineer. Analyze code for bugs, security, and clean code violations."
-        self.max_chars = int(config.get('gemini_max_chars', 30000))
-        self.enabled = config['check_ai']
-        self.client = None
+    def __init__(self, enabled: bool, api_key: str, model: str, max_chars: int = 30000):
+        super().__init__(name="Gemini AI", enabled=enabled)
+        self.model = model
+        self.max_chars = max_chars
         
         if self.enabled:
-            if not self.api_key or "YOUR_GEMINI_API_KEY" in self.api_key:
-                logger.warning("Gemini API Key is missing. AI check disabled.")
+            if not api_key:
+                logger.error(f"[{self.name}] API Key не найден! Модуль отключен.")
                 self.enabled = False
             else:
                 try:
-                    genai.configure(api_key=self.api_key)
-                    self.client = genai.GenerativeModel(
-                        model_name=self.model_name,
-                        system_instruction=self.system_instruction
-                    )
+                    self.client = genai.Client(api_key=api_key)
                 except Exception as e:
-                    logger.error(f"Failed to init Gemini: {e}")
+                    logger.error(f"[{self.name}] Ошибка инициализации клиента: {e}")
                     self.enabled = False
 
     def check(self, path: str, content: str, ext: str) -> List[Issue]:
@@ -373,20 +366,23 @@ class AuditEngine:
                     
         return files_to_check
 
-    def restore_state(self) -> List[FileReport]:
-        """Загрузка состояния из временного файла (Resume capability)."""
+    def restore_state(self) -> List[str]:
+        """Загрузка прогресса (Persistence)"""
         if os.path.exists(self.temp_file):
             try:
                 with open(self.temp_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    # Корректное восстановление объектов из JSON
-                    return [FileReport(
-                        path=r['path'], 
-                        timestamp=r['timestamp'], 
-                        issues=[Issue(**i) for i in r['issues']]
-                    ) for r in data]
-            except Exception as e:
-                logger.warning(f"Не удалось восстановить состояние (файл поврежден?): {e}")
+                    self.reports = [FileReport(path=r['path'], timestamp=r['timestamp'], 
+                                    issues=[Issue(**i) for i in r['issues']]) for r in data]
+                # Метод должен возвращать список объектов FileReport
+                if os.path.exists(self.temp_file):
+                    with open(self.temp_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        return [FileReport(path=r['path'], timestamp=r['timestamp'], 
+                                issues=[Issue(**i) for i in r['issues']]) for r in data]
+                return []
+            except Exception:
+                return []
         return []
     
     def save_state(self):
@@ -409,94 +405,134 @@ class AuditEngine:
         print(f"🚀 ЗАПУСК CODE AUDITOR...")
         self.print_config()
         
+        # 1. Сканируем файлы
         all_files = self.scan()
         if not all_files:
-            print(f"⚠️ Файлы не найдены в папке {self.cfg['source_dir']}.")
+            print(f"⚠️  Файлы для проверки не найдены в '{self.cfg['src']}'. Проверьте настройки фильтров или пути.")
             return
 
-        # --- ЛОГИКА RESUME (НОВОВВЕДЕНИЕ) ---
+       # 2. Управление состоянием (Resume Logic)
         if self.cfg['resume_audit']:
             self.reports = self.restore_state()
             processed_paths = {r.path for r in self.reports}
             if processed_paths:
-                print(f"🔄 Восстановлен прогресс: уже проверено {len(processed_paths)} файлов.")
+                print(f"🔄 Режим докачки: Найдено {len(processed_paths)} проверенных файлов.")
         else:
             self.reports = []
             processed_paths = set()
-
-        # Фильтрация файлов, которые нужно проверить
-        queue = [f for f in all_files if f not in processed_paths]
-        print(f"📊 Предстоит проверить: {len(queue)} файлов.")
+            if os.path.exists(self.temp_file):
+                os.remove(self.temp_file)
+                print("🧹 Старый прогресс удален (чистый старт).")
         
-        # --- ОСНОВНОЙ ЦИКЛ ---
+        # Сразу формируем очередь из оставшихся файлов
+        queue = [f for f in all_files if f not in processed_paths]
+        
+        # 3. Вывод статистики ПЕРЕД работой
+        print(f"📊 СТАТИСТИКА ЗАДАЧИ:")
+        print(f"   • Всего файлов:   {len(all_files)}")
+        print(f"   • Уже проверено:  {len(processed_paths)}")
+        print(f"   • В очереди:      {len(queue)}")
+        print("-" * 50)
+        
+        if not queue:
+            print("✅ Все файлы уже проверены! Генерация отчета...")
+            self.generate_report()
+            return
+
+        # 4. Основной цикл
         for idx, path in enumerate(queue, 1):
             filename = os.path.basename(path)
             print(f"👉 [{idx}/{len(queue)}] {filename}...", end="", flush=True)
             
-            file_issues = []
-            api_called = False
-            content = ""
-            
             try:
-                # 1. Чтение файла
-                with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-                
-                # Если файл пустой — пропускаем, но помечаем как проверенный
-                if not content.strip():
-                    print(" ⏩ Пуст (Skipped)")
-                    self.reports.append(FileReport(path, datetime.now().strftime("%H:%M"), []))
-                    self.save_state()
+                # Безопасное чтение контента (Заплатка на 404.html)
+                try:
+                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                    if not content.strip():
+                        logger.warning(f"⏩ Файл пуст, пропускаем: {path}")
+                        continue
+                except Exception as e:
+                    logger.error(f"❌ Не удалось прочитать {path}: {e}")
                     continue
-
+                
                 ext = os.path.splitext(path)[1].lower()
                 
-                # 2. Запуск валидаторов
-                for validator in self.validators:
-                    if not validator.enabled:
-                        continue
-                    
-                    try:
-                        # ИСПРАВЛЕНИЕ: Вызов метода check, а не validate
-                        issues = validator.check(path, content, ext)
-                        if issues:
-                            file_issues.extend(issues)
-                        
-                        # Флаг для задержки API
-                        if isinstance(validator, (W3CValidator, GeminiValidator)):
-                            api_called = True
-                    except Exception as ve:
-                        # Ловим ошибку конкретного валидатора, чтобы не крашить весь скрипт
-                        logger.error(f"Ошибка в {validator.name}: {ve}")
+                # --- ПОЛИМОРФНЫЙ ЗАПУСК ВАЛИДАТОРОВ ---
+                api_called = False
+                
+                # Инициализация списка для сбора ошибок текущего файла
+                # #### (Затыкаем дырку: теперь переменная точно объявлена)
+                file_issues = [] 
+                
+                # Проходим по всем активным валидаторам
+            for validator in self.validators:
+                if not validator.enabled:
+                    continue
 
-                # 3. Сохранение результата (АТОМАРНОЕ)
-                # ИСПРАВЛЕНИЕ: Это вынесено из цикла валидаторов, чтобы не дублировать отчеты
+                try:
+                    # 1. Запуск проверки
+                    # Используем универсальный метод validate (или check, если он основной)
+                    # В вашей архитектуре лучше использовать один метод.
+                    issues = validator.validate(path, content)
+                    
+                    if issues:
+                        file_issues.extend(issues)
+
+                    # 2. Фиксация вызова API для последующей паузы
+                    if isinstance(validator, (W3CValidator, GeminiValidator)):
+                        api_called = True
+
+                except Exception as e:
+                    # Если один валидатор "упал", логгируем и идем к следующему
+                    # Это и есть главная заплатка для 404.html
+                    logger.error(f"⚠️ Сбой валидатора {validator.__class__.__name__} на файле {path}: {e}")
+                    continue
+
+                # Сохранение результата в отчет
+                # #### (Затыкаем дырку: передаем собранный список)
                 new_report = FileReport(path, datetime.now().strftime("%H:%M"), file_issues)
                 self.reports.append(new_report)
+
+                # Мгновенная запись на диск (защита от вылета на 404.html)
+                # Мгновенная атомарная запись на диск (защита от вылетов и потери данных)
                 self.save_state()
                 
-                # 4. Вывод в консоль
-                if not file_issues:
-                    print(" ✅ OK")
-                else:
-                    print(f" ⚠️ {len(file_issues)} issues")
-
-                # 5. Rate Limiting (Задержка)
+                # Вывод статуса в терминал
+                msg_status = "✅ OK" if not file_issues else f"⚠️ {len(file_issues)} issues"
+                print(f" {msg_status}")
+                
+                # Пауза перед следующим файлом (Rate Limiting)
+                # --- УМНАЯ ЗАДЕРЖКА (Rate Limiting) ---
                 if api_called:
                     sleep_cfg = str(self.cfg['api_sleep'])
+                    
                     if "_" in sleep_cfg:
-                        mn, mx = map(float, sleep_cfg.split("_"))
-                        st = random.uniform(mn, mx)
+                        # Если формат 7_10, выбираем рандомное число
+                        try:
+                            low, high = map(float, sleep_cfg.split("_"))
+                            sleep_time = random.uniform(low, high)
+                        except Exception:
+                            sleep_time = 10.0 # Страховка, если в .env написали дичь
                     else:
-                        st = float(sleep_cfg)
-                    time.sleep(st)
+                        # Если просто число (например 10.0)
+                        try:
+                            sleep_time = float(sleep_cfg)
+                        except Exception:
+                            sleep_time = 10.0
+
+                    print(f" ⏳ Пауза {sleep_time:.1f}с...")
+                    time.sleep(sleep_time)
 
             except Exception as e:
-                # Глобальная защита от падения на конкретном файле
-                print(f" ❌ Критическая ошибка файла: {e}")
-
-        # Генерация финального HTML
+                print(f"\n❌ ФАТАЛЬНАЯ ОШИБКА ФАЙЛА {path}: {e}")
+                logger.exception(e)
+        
         self.generate_report()
+        # Удаляем временный файл только если все прошло успешно
+        if os.path.exists(self.temp_file): 
+            os.remove(self.temp_file)
+            print("🧹 Временный файл очищен.")
 
     def generate_report(self):
         """Генерация HTML отчета"""
