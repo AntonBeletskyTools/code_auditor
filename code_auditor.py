@@ -13,7 +13,7 @@ CODE AUDITOR
 3. State Persistence: Защита от сбоев (сохранение прогресса).
 4. Гибкие фильтры: Настройка через .env.
 
-АВТОР: Gemini Pro (Cleaned Version)
+АВТОР: Gemini Pro (Fixed & Merged Version)
 ==============================================================================
 # ==============================================================================
 # КОНФИГУРАЦИЯ CODE AUDITOR
@@ -52,7 +52,7 @@ CHECK_SCRIPTS=True
 # --- PERFORMANCE & LIMITS ---
 # Задержка между файлами в секундах.
 # ВАЖНО: W3C может забанить IP при слишком частых запросах. 
-# 7_15 секунд — безопасный интервал для стабильной работы. рандом между 7 и 15 секундами
+# 7_15 секунд — безопасный интервал для стабильной работы.
 API_SLEEP=7_15
 
 # Максимальное количество символов кода для отправки в Gemini
@@ -169,42 +169,33 @@ class W3CValidator(BaseValidator):
                 return [Issue(type="error", line=0, message="🚫 W3C API: Бан за частые запросы (429). Увеличь API_SLEEP!", source=self.name)]
 
             elif status_code == 404:
-                # Это сработает ТОЛЬКО если API W3C выдаст 404 (сервис упал)
-                # Твой файл 404.html при этом пройдет через status_code == 200 и не вызовет проблем
                 logger.warning(f"[{self.name}] 404: API Endpoint not found!")
                 return [Issue(type="warning", line=0, message="⚠️ W3C API: Сервис валидации временно недоступен (404)", source=self.name)]
 
             else:
-                # Любая другая фигня от сервера (500, 502 и т.д.)
                 return [Issue(type="error", line=0, message=f"W3C API Error: {status_code}", source=self.name)]
 
         except Exception as e:
-            # Если вообще инета нет или таймаут
             logger.error(f"[{self.name}] Connection Error: {e}")
             return [Issue(type="warning", line=0, message=f"W3C Connection Failed", source=self.name)]
 
 class GeminiValidator(BaseValidator):
     """Модуль интеллектуального анализа (AI)"""
 
-    def __init__(self, config):
-        self.api_key = config['gemini_key']
-        self.model_name = config['gemini_model']
-        self.system_instruction = "You are a Senior QA Engineer. Analyze code for bugs, security, and clean code violations."
-        self.max_chars = int(config.get('gemini_max_chars', 30000))
-        self.enabled = config['check_ai']
+    def __init__(self, enabled: bool, api_key: str, model: str, max_chars: int = 30000):
+        super().__init__(name="Gemini AI", enabled=enabled)
+        self.model = model
+        self.max_chars = max_chars
         self.client = None
         
         if self.enabled:
-            if not self.api_key or "YOUR_GEMINI_API_KEY" in self.api_key:
+            if not api_key or "YOUR_GEMINI_API_KEY" in api_key:
                 logger.warning("Gemini API Key is missing. AI check disabled.")
                 self.enabled = False
             else:
                 try:
-                    genai.configure(api_key=self.api_key)
-                    self.client = genai.GenerativeModel(
-                        model_name=self.model_name,
-                        system_instruction=self.system_instruction
-                    )
+                    # Инициализация клиента (Google GenAI)
+                    self.client = genai.Client(api_key=api_key)
                 except Exception as e:
                     logger.error(f"Failed to init Gemini: {e}")
                     self.enabled = False
@@ -301,7 +292,7 @@ class AuditEngine:
         self.validators: List[BaseValidator] = []
         self.reports: List[FileReport] = []
         
-        # Регистрация плагинов
+        # Регистрация плагинов (ИСПРАВЛЕНО: Передача аргументов теперь соответствует классу GeminiValidator)
         self.validators.append(W3CValidator(enabled=self.cfg['w3c_on']))
         self.validators.append(GeminiValidator(
             enabled=self.cfg['gemini_on'], 
@@ -379,14 +370,13 @@ class AuditEngine:
             try:
                 with open(self.temp_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    # Корректное восстановление объектов из JSON
                     return [FileReport(
                         path=r['path'], 
                         timestamp=r['timestamp'], 
                         issues=[Issue(**i) for i in r['issues']]
                     ) for r in data]
             except Exception as e:
-                logger.warning(f"Не удалось восстановить состояние (файл поврежден?): {e}")
+                logger.warning(f"Не удалось восстановить состояние: {e}")
         return []
     
     def save_state(self):
@@ -395,15 +385,13 @@ class AuditEngine:
         try:
             # 1. Записываем данные в теневой временный файл
             with open(temp_shadow, 'w', encoding='utf-8') as f:
-                json.dump([asdict(r) for r in self.reports], f, ensure_ascii=False)
+                json.dump([asdict(r) for r in self.reports], f, ensure_ascii=False, indent=2)
             
             # 2. Только если запись прошла успешно, заменяем основной файл теневым
-            # Это мгновенная операция на уровне файловой системы
-            os.replace(temp_shadow, self.temp_file)
+            if os.path.exists(temp_shadow):
+                os.replace(temp_shadow, self.temp_file)
         except Exception as e:
             logger.error(f"Критическая ошибка записи временного файла: {e}")
-            if os.path.exists(temp_shadow):
-                os.remove(temp_shadow)
 
     def run(self):
         print(f"🚀 ЗАПУСК CODE AUDITOR...")
@@ -411,7 +399,7 @@ class AuditEngine:
         
         all_files = self.scan()
         if not all_files:
-            print(f"⚠️ Файлы не найдены в папке {self.cfg['source_dir']}.")
+            print(f"⚠️ Файлы не найдены в папке {self.cfg['src']}.")
             return
 
         # --- ЛОГИКА RESUME (НОВОВВЕДЕНИЕ) ---
@@ -419,7 +407,7 @@ class AuditEngine:
             self.reports = self.restore_state()
             processed_paths = {r.path for r in self.reports}
             if processed_paths:
-                print(f"🔄 Восстановлен прогресс: уже проверено {len(processed_paths)} файлов.")
+                print(f"🔄 Режим докачки: уже проверено {len(processed_paths)} файлов.")
         else:
             self.reports = []
             processed_paths = set()
@@ -485,8 +473,10 @@ class AuditEngine:
                 if api_called:
                     sleep_cfg = str(self.cfg['api_sleep'])
                     if "_" in sleep_cfg:
-                        mn, mx = map(float, sleep_cfg.split("_"))
-                        st = random.uniform(mn, mx)
+                        try:
+                            mn, mx = map(float, sleep_cfg.split("_"))
+                            st = random.uniform(mn, mx)
+                        except: st = 10.0
                     else:
                         st = float(sleep_cfg)
                     time.sleep(st)
@@ -497,6 +487,13 @@ class AuditEngine:
 
         # Генерация финального HTML
         self.generate_report()
+        
+        # Удаление временного файла после успешного завершения
+        if os.path.exists(self.temp_file):
+            try:
+                os.remove(self.temp_file)
+                print("🧹 Временный файл состояния удален (аудит завершен).")
+            except: pass
 
     def generate_report(self):
         """Генерация HTML отчета"""
