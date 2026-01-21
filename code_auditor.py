@@ -1,329 +1,567 @@
 """
-GEMINI CODE QUALITY AUDITOR (v2.1 - Production Ready)
-=====================================================
-Инструмент для автоматизированного аудита кода с использованием AI и W3C.
+==============================================================================
+CODE AUDITOR
+Профессиональная система аудита кода.
+Архитектура: Plugin-based (Валидаторы изолированы).
 
-Требования:
-    pip install google-genai requests python-dotenv
+ФУНКЦИОНАЛ:
+1. Изоляция ошибок: Сбой одного модуля не ломает весь процесс.
+2. Матрица ответственности:
+   - HTML/CSS -> W3C Validator + Gemini AI
+   - SCSS/SASS -> Gemini AI
+   - JS/TS/React -> Gemini AI
+3. State Persistence: Защита от сбоев (сохранение прогресса).
+4. Гибкие фильтры: Настройка через .env.
 
-Использование:
-    1. Создайте файл .env: GEMINI_API_KEY=ваш_ключ
-    2. Запустите: python code_auditor.py
+АВТОР: Gemini Pro (Cleaned Version)
+==============================================================================
+# ==============================================================================
+# КОНФИГУРАЦИЯ CODE AUDITOR
+# ==============================================================================
+
+# --- API CONFIG ---
+# Твой API ключ от Google AI Studio (https://aistudio.google.com/)
+GEMINI_API_KEY=YOUR_GEMINI_API_KEY_HERE
+
+# Выбор модели Gemini
+# models/gemini-1.5-flash — быстрая и дешевая (рекомендуется)
+# models/gemini-2.0-flash — актуальная стабильная версия
+GEMINI_MODEL=models/gemini-2.0-flash
+
+# --- PATHS ---
+# Папка, которую нужно сканировать (например, src, project_folder или .)
+SOURCE_DIR=src
+
+# --- GLOBAL TOGGLES (Включение/Выключение модулей) ---
+# Проверка стандартов через W3C API (HTML/CSS)
+ENABLE_W3C=True
+
+# Интеллектуальный аудит через Gemini AI (JS/TS/SCSS/Логика)
+ENABLE_GEMINI=True
+
+# --- CONTENT FILTERS (Что именно проверять) ---
+# HTML файлы (.html)
+CHECK_HYPERTEXT=True
+
+# Стили (.css, .scss, .sass)
+CHECK_STYLES=True
+
+# Скрипты (.js, .jsx, .ts, .tsx)
+CHECK_SCRIPTS=True
+
+# --- PERFORMANCE & LIMITS ---
+# Задержка между файлами в секундах.
+# ВАЖНО: W3C может забанить IP при слишком частых запросах. 
+# 7_15 секунд — безопасный интервал для стабильной работы. рандом между 7 и 15 секундами
+API_SLEEP=7_15
+==============================================================================
 """
 
 import os
-import time
 import json
+import time
 import re
 import requests
 import logging
+import traceback
+import random
+from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import List, Dict, Any
+from dataclasses import dataclass, asdict, field
+from typing import List, Dict, Optional, Any
 
-# --- Инициализация окружения (.env) ---
+# --- Инициализация окружения ---
 try:
     from dotenv import load_dotenv
-    load_dotenv()  # Загружает переменные из файла .env
+    load_dotenv()
 except ImportError:
-    print("⚠️ Библиотека 'python-dotenv' не найдена. Переменные из .env не будут загружены.")
+    pass
 
-# Попытка импорта SDK Google
 try:
     from google import genai
     from google.genai import types
 except ImportError:
-    print("CRITICAL ERROR: Библиотека 'google-genai' не установлена.")
-    print("Запустите: pip install google-genai requests python-dotenv")
+    print("❌ CRITICAL: pip install google-genai requests python-dotenv")
     exit(1)
 
-# ================= КОНФИГУРАЦИЯ =================
-# Скрипт сначала ищет ключ в .env, затем в системных переменных
-API_KEY = os.getenv("GEMINI_API_KEY")
+# Логирование
+logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s', datefmt='%H:%M:%S')
+logger = logging.getLogger("CodeAuditor")
 
-CONFIG = {
-    "source_dir": "src",              # Папка с исходным кодом
-    "report_file": "audit_report.html", # Имя файла отчета
-    "model_name": "gemini-3-flash-preview",   # Актуальная быстрая модель
-    "extensions": ('.html', '.css', '.js', '.jsx', '.ts', '.tsx', '.scss'),
-    "rpm_limit": 15,                    # Лимит запросов в минуту (Free Tier)
-    "w3c_enabled": True                 # Включить классическую валидацию
-}
+# ================= 1. DATA MODELS (OOP) =================
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+@dataclass
+class Issue:
+    """Единица найденной проблемы"""
+    type: str       # error, warning, suggestion
+    line: int
+    message: str
+    source: str     # Имя валидатора
+    suggestion: Optional[str] = None
 
-class CodeAuditor:
-    """
-    Класс-оркестратор для проверки качества кода.
-    """
-    def __init__(self, api_key: str, config: Dict):
-        if not api_key:
-            raise ValueError("❌ API Key не найден! Убедитесь, что файл .env создан и содержит GEMINI_API_KEY.")
-        
-        self.client = genai.Client(api_key=api_key)
-        self.config = config
-        self.tasks: List[str] = []
-        self.results: List[Dict] = []
-        self.stats = {"errors": 0, "warnings": 0, "suggestions": 0, "total_files": 0}
-        
-        # Расчет безопасной задержки (60 сек / RPM + буфер)
-        self.delay = (60.0 / config["rpm_limit"]) + 1.0
+@dataclass
+class FileReport:
+    """Результат проверки одного файла"""
+    path: str
+    timestamp: str
+    issues: List[Issue] = field(default_factory=list)
 
-    def scan_directory(self) -> None:
-        """Сканирует директорию на наличие целевых файлов."""
-        logger.info(f"Сканирование папки '{self.config['source_dir']}'...")
-        
-        if not os.path.exists(self.config['source_dir']):
-            logger.error(f"Папка '{self.config['source_dir']}' не найдена.")
-            return
+# ================= 2. ABSTRACT VALIDATOR =================
 
-        for root, _, files in os.walk(self.config['source_dir']):
-            for file in files:
-                if file.lower().endswith(self.config['extensions']):
-                    self.tasks.append(os.path.join(root, file))
-        
-        self.stats["total_files"] = len(self.tasks)
-        logger.info(f"Найдено файлов для анализа: {self.stats['total_files']}")
+class BaseValidator(ABC):
+    """Базовый класс для всех проверочных модулей"""
+    def __init__(self, name: str, enabled: bool, **kwargs):
+        self.name = name
+        self.enabled = enabled
+        for key, value in kwargs.items():
+            setattr(self, key, value)
 
-    def _clean_json_response(self, text: str) -> str:
-        """Очищает ответ AI от Markdown-оберток."""
-        cleaned = re.sub(r"^```json\s*", "", text, flags=re.MULTILINE)
-        cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.MULTILINE)
-        return cleaned.strip()
+    @abstractmethod
+    def check(self, path: str, content: str, ext: str) -> List[Issue]:
+        pass
 
-    def check_w3c(self, content: str, ext: str) -> List[Dict]:
-        """Отправляет HTML/CSS на валидатор W3C."""
-        if not self.config['w3c_enabled'] or ext not in ['.html', '.css']:
+# ================= 3. CONCRETE VALIDATORS =================
+
+class W3CValidator(BaseValidator):
+    """Модуль строгой проверки стандартов (HTML/CSS)"""
+    
+    API_URL = "https://validator.w3.org/nu/?out=json"
+    
+    def __init__(self, enabled: bool):
+        super().__init__(name="W3C Validator", enabled=enabled)
+
+    def check(self, path: str, content: str, ext: str) -> List[Issue]:
+        # W3C работает только с чистым HTML и CSS
+        if not self.enabled or ext not in ['.html', '.css']:
             return []
 
-        url = "https://validator.w3.org/nu/?out=json"
-        content_type = "text/html" if ext == '.html' else "text/css"
-        headers = {'User-Agent': 'CodeAuditor/2.1', 'Content-Type': f'{content_type}; charset=utf-8'}
+        ctype = "text/html" if ext == '.html' else "text/css"
+        # User-Agent важен, чтобы W3C не блокировал запросы как спам
+        headers = {'User-Agent': 'CodeAuditor/1.0', 'Content-Type': f'{ctype}; charset=utf-8'}
 
         try:
-            resp = requests.post(url, data=content.encode('utf-8'), headers=headers, timeout=10)
-            if resp.status_code == 200:
+            resp = requests.post(self.API_URL, data=content.encode('utf-8'), headers=headers, timeout=15)
+            
+            # Сохраняем код ответа в переменную, чтобы не дергать его сто раз
+            status_code = resp.status_code
+
+            if status_code == 200:
+                # Если всё ок, выводим реальные ошибки валидации кода
                 messages = resp.json().get('messages', [])
-                return [{
-                    "type": "error" if m.get('type') == 'error' else "warning",
-                    "line": m.get('lastLine', 0),
-                    "message": f"[W3C] {m.get('message')}",
-                    "source": "W3C Validator"
-                } for m in messages]
+                return [Issue(
+                    type="error" if m.get('type') == 'error' else "warning",
+                    line=m.get('lastLine', m.get('firstLine', 0)),
+                    message=f"[W3C] {m.get('message')}",
+                    source=self.name
+                ) for m in messages]
+
+            elif status_code == 429:
+                # ВАЖНО: Если W3C забанил за частые запросы — это пойдет в отчет
+                logger.error(f"[{self.name}] 429: Too Many Requests!")
+                return [Issue(type="error", line=0, message="🚫 W3C API: Бан за частые запросы (429). Увеличь API_SLEEP!", source=self.name)]
+
+            elif status_code == 404:
+                # Это сработает ТОЛЬКО если API W3C выдаст 404 (сервис упал)
+                # Твой файл 404.html при этом пройдет через status_code == 200 и не вызовет проблем
+                logger.warning(f"[{self.name}] 404: API Endpoint not found!")
+                return [Issue(type="warning", line=0, message="⚠️ W3C API: Сервис валидации временно недоступен (404)", source=self.name)]
+
+            else:
+                # Любая другая фигня от сервера (500, 502 и т.д.)
+                return [Issue(type="error", line=0, message=f"W3C API Error: {status_code}", source=self.name)]
+
         except Exception as e:
-            logger.warning(f"W3C Validator недоступен: {e}")
-        
-        return []
+            # Если вообще инета нет или таймаут
+            logger.error(f"[{self.name}] Connection Error: {e}")
+            return [Issue(type="warning", line=0, message=f"W3C Connection Failed", source=self.name)]
 
-    def check_ai_gemini(self, file_path: str, content: str) -> List[Dict]:
-        """Анализирует код через Gemini с механизмом повторных попыток (Retry)."""
+class GeminiValidator(BaseValidator):
+    """Модуль интеллектуального анализа (AI)"""
+
+    def __init__(self, enabled: bool, api_key: str, model: str):
+        super().__init__(name="Gemini AI", enabled=enabled)
+        self.model = model
+        self.client = None
+        
+        if self.enabled:
+            if not api_key:
+                logger.error(f"[{self.name}] API Key не найден! Модуль отключен.")
+                self.enabled = False
+            else:
+                try:
+                    self.client = genai.Client(api_key=api_key)
+                except Exception as e:
+                    logger.error(f"[{self.name}] Ошибка инициализации клиента: {e}")
+                    self.enabled = False
+
+    def check(self, path: str, content: str, ext: str) -> List[Issue]:
+        if not self.enabled or not self.client:
+            return []
+        
+        # Формируем контекст для ИИ
+        context = "код"
+        if ext in ['.css', '.scss', '.sass']: context = "стили и верстку (SCSS/CSS)"
+        elif ext in ['.js', '.jsx', '.ts', '.tsx']: context = "скрипты, логику и безопасность (JS/React)"
+        elif ext == '.html': context = "HTML структуру и семантику"
+
         prompt = f"""
-        Ты Senior Code Reviewer. Проведи аудит кода файла: {file_path}
+        Роль: Senior Code Reviewer. Задача: Аудит файла {path}.
+        Контекст: Ты анализируешь {context}.
         
-        Критерии анализа:
-        1. Логические ошибки и баги (Critical).
-        2. Безопасность (XSS, SQLi, Secrets).
-        3. Чистота кода (DRY, именование, форматирование).
-        4. Производительность.
-
-        Верни ответ СТРОГО в валидном JSON формате без лишнего текста:
+        Требования:
+        1. Ищи логические баги, XSS уязвимости, утечки памяти.
+        2. Проверяй чистоту кода (DRY, naming convention).
+        3. Если это SCSS - проверяй вложенность.
+        4. Будь краток и конструктивен.
+        
+        Формат ответа (JSON ONLY):
         {{
             "issues": [
                 {{
-                    "type": "error" | "warning" | "suggestion",
-                    "line": <номер строки числом>,
-                    "message": "<краткое описание проблемы на русском>",
-                    "suggestion": "<как исправить>"
+                    "type": "error"|"warning"|"suggestion",
+                    "line": <int>,
+                    "message": "<text_ru>",
+                    "suggestion": "<fix_code_snippet_if_needed>"
                 }}
             ]
         }}
         
-        Если проблем нет, верни "issues": [].
-        
-        КОД:
-        {content[:30000]} 
+        CODE:
+        {content[:30000]}
         """
 
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                response = self.client.models.generate_content(
-                    model=self.config["model_name"],
-                    contents=prompt,
-                    config=types.GenerateContentConfig(response_mime_type="application/json")
-                )
-                
-                raw_text = self._clean_json_response(response.text)
-                data = json.loads(raw_text)
-                
-                issues = data.get("issues", [])
-                for i in issues:
-                    i["source"] = "Gemini AI"
-                return issues
+        try:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            
+            # Очистка JSON от маркдауна (на всякий случай)
+            clean_json = re.sub(r"^```json\s*|\s*```$", "", response.text, flags=re.MULTILINE).strip()
+            data = json.loads(clean_json)
+            
+            return [Issue(
+                type=i.get('type', 'warning'),
+                line=i.get('line', 0),
+                message=i.get('message', 'Issue detected'),
+                source=self.name,
+                suggestion=i.get('suggestion')
+            ) for i in data.get('issues', [])]
 
-            except Exception as e:
-                error_str = str(e)
-                if "429" in error_str:
-                    wait_time = (attempt + 1) * 20
-                    logger.warning(f"⚠️ Лимит квот (429). Ждем {wait_time} сек...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"Ошибка AI анализа для {file_path}: {e}")
-                    return []
+        except Exception as e:
+            if "429" in str(e):
+                logger.warning(f"[{self.name}] Quota exceeded (429). Skipping {path}...")
+                return [Issue(type="warning", line=0, message="Gemini Rate Limit (Skipped)", source=self.name)]
+            elif "404" in str(e) or "not found" in str(e).lower():
+                logger.error(f"[{self.name}] Неверная модель '{self.model}'. Проверьте .env!")
+                self.enabled = False 
+                return [Issue(type="error", line=0, message="Invalid Gemini Model configuration", source=self.name)]
+            else:
+                logger.error(f"[{self.name}] Error analyzing {path}: {e}")
+                return [Issue(type="error", line=0, message=f"AI Error: {str(e)[:50]}", source=self.name)]
+
+# ================= 4. ENGINE (ORCHESTRATOR) =================
+
+class AuditEngine:
+    """Главный класс-оркестратор Code Auditor"""
+    
+    def __init__(self):
+        self.load_config()
+        self.temp_file = "audit_state.temp.json"
+        self.validators: List[BaseValidator] = []
+        self.reports: List[FileReport] = []
+        
+        # Регистрация плагинов
+        self.validators.append(W3CValidator(enabled=self.cfg['w3c_on']))
+        self.validators.append(GeminiValidator(
+            enabled=self.cfg['gemini_on'], 
+            api_key=self.cfg['api_key'], 
+            model=self.cfg['model']
+        ))
+
+    def load_config(self):
+        """Загрузка и нормализация конфига"""
+        def get_bool(k, d="True"): return os.getenv(k, d).lower() in ("true", "1", "yes", "on")
+        
+        self.cfg = {
+            'src': os.getenv("SOURCE_DIR", "src"),
+            'api_key': os.getenv("GEMINI_API_KEY"),
+            'model': os.getenv("GEMINI_MODEL", "models/gemini-1.5-flash"),
+            'w3c_on': get_bool("ENABLE_W3C"),
+            'gemini_on': get_bool("ENABLE_GEMINI"),
+            'filter_html': get_bool("CHECK_HYPERTEXT"),
+            'filter_css': get_bool("CHECK_STYLES"),
+            'filter_js': get_bool("CHECK_SCRIPTS"),
+            'api_sleep': os.getenv("API_SLEEP", "10.0"), # Дефолт из запроса пользователя
+        }
+
+    def print_config(self):
+        """Красивый вывод настроек"""
+        print("\n" + "="*50)
+        print("🛠  CODE AUDITOR CONFIGURATION")
+        print("="*50)
+        print(f"📂 Источник (Source):   {self.cfg['src']}")
+        print(f"🤖 AI Модель:           {self.cfg['model']}")
+        print(f"⏱  Задержка (Sleep):    {self.cfg['api_sleep']} сек.")
+        print("-" * 50)
+        print(f"🔌 Модули:")
+        print(f"   • W3C Validator:     {'✅ ON' if self.cfg['w3c_on'] else '❌ OFF'}")
+        print(f"   • Gemini AI:         {'✅ ON' if self.cfg['gemini_on'] else '❌ OFF'}")
+        print("-" * 50)
+        print(f"🔍 Фильтры файлов:")
+        print(f"   • HTML:              {'✅ YES' if self.cfg['filter_html'] else '⬜ NO'}")
+        print(f"   • CSS/SCSS:          {'✅ YES' if self.cfg['filter_css'] else '⬜ NO'}")
+        print(f"   • JS/TS/React:       {'✅ YES' if self.cfg['filter_js'] else '⬜ NO'}")
+        print("="*50 + "\n")
+
+    def scan(self) -> List[str]:
+        """Умное сканирование с учетом фильтров"""
+        files_to_check = []
+        ext_map = {
+            'html': ['.html'],
+            'css': ['.css', '.scss', '.sass'],
+            'js': ['.js', '.jsx', '.ts', '.tsx']
+        }
+        
+        for root, _, files in os.walk(self.cfg['src']):
+            for f in files:
+                ext = os.path.splitext(f)[1].lower()
+                path = os.path.join(root, f)
+                
+                # Применяем фильтры из .env
+                if ext in ext_map['html'] and self.cfg['filter_html']:
+                    files_to_check.append(path)
+                elif ext in ext_map['css'] and self.cfg['filter_css']:
+                    files_to_check.append(path)
+                elif ext in ext_map['js'] and self.cfg['filter_js']:
+                    files_to_check.append(path)
+                    
+        return files_to_check
+
+    def restore_state(self) -> List[str]:
+        """Загрузка прогресса (Persistence)"""
+        if os.path.exists(self.temp_file):
+            try:
+                with open(self.temp_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.reports = [FileReport(path=r['path'], timestamp=r['timestamp'], 
+                                    issues=[Issue(**i) for i in r['issues']]) for r in data]
+                # Метод должен возвращать список объектов FileReport
+                if os.path.exists(self.temp_file):
+                    with open(self.temp_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        return [FileReport(path=r['path'], timestamp=r['timestamp'], 
+                                issues=[Issue(**i) for i in r['issues']]) for r in data]
+                return []
+            except Exception:
+                return []
         return []
 
-    def run_pipeline(self):
-        """Запуск основного цикла проверки."""
-        if not self.tasks:
-            self.scan_directory()
+    def save_state(self):
+        """Инкрементальное сохранение"""
+        with open(self.temp_file, 'w', encoding='utf-8') as f:
+            json.dump([asdict(r) for r in self.reports], f, ensure_ascii=False, indent=2)
+
+    def run(self):
+        print(f"🚀 ЗАПУСК CODE AUDITOR...")
+        self.print_config()
         
-        if self.stats["total_files"] == 0:
-            logger.warning("Файлы для анализа не найдены.")
+        # 1. Сканируем файлы
+        all_files = self.scan()
+        if not all_files:
+            print(f"⚠️  Файлы для проверки не найдены в '{self.cfg['src']}'. Проверьте настройки фильтров или пути.")
             return
 
-        print(f"\n🚀 Запуск анализа {self.stats['total_files']} файлов...")
-        print(f"📡 Модель: {self.config['model_name']} | 🐢 Задержка: {self.delay:.1f} сек/файл")
+        # 2. Восстанавливаем состояние
+        
+        # Принудительно загружаем старые отчеты в список перед началом
+        # 2.1. Сначала загружаем объекты отчетов в self.reports
+        self.reports = self.restore_state() 
+        # 2.2. Создаем множество ПУТЕЙ из этих отчетов
+        processed_paths = {r.path for r in self.reports}
+        # 2.3. Формируем очередь из тех файлов, путей которых НЕТ в списке проверенных
+        queue = [f for f in all_files if f not in processed_paths]
+        
+        # 3. Вывод статистики ПЕРЕД работой
+        print(f"📊 СТАТИСТИКА ЗАДАЧИ:")
+        print(f"   • Всего файлов:   {len(all_files)}")
+        print(f"   • Уже проверено:  {len(processed_paths)}")
+        print(f"   • В очереди:      {len(queue)}")
+        print("-" * 50)
+        
+        if not queue:
+            print("✅ Все файлы уже проверены! Генерация отчета...")
+            self.generate_report()
+            return
 
-        for idx, path in enumerate(self.tasks, 1):
-            file_name = os.path.basename(path)
-            ext = os.path.splitext(path)[1].lower()
-            
-            print(f"[{idx}/{self.stats['total_files']}] 🔍 {file_name}...", end="", flush=True)
-
-            file_issues = []
+        # 4. Основной цикл
+        for idx, path in enumerate(queue, 1):
+            filename = os.path.basename(path)
+            print(f"👉 [{idx}/{len(queue)}] {filename}...", end="", flush=True)
             
             try:
                 with open(path, 'r', encoding='utf-8') as f:
                     content = f.read()
-
-                # 1. AI Проверка (Все файлы)
-                ai_results = self.check_ai_gemini(path, content)
-                file_issues.extend(ai_results)
                 
-                # 2. W3C Проверка (Только HTML/CSS)
-                w3c_results = self.check_w3c(content, ext)
-                file_issues.extend(w3c_results)
-
-                # Агрегация статистики
-                for issue in file_issues:
-                    key = f"{issue.get('type', 'warning')}s"
-                    self.stats[key] = self.stats.get(key, 0) + 1
-
-                self.results.append({
-                    "path": path,
-                    "issues": file_issues
-                })
+                ext = os.path.splitext(path)[1].lower()
                 
-                if not file_issues:
-                    print(" ✅ OK")
-                else:
-                    err_count = sum(1 for i in file_issues if i['type'] == 'error')
-                    print(f" ⚠️ Найдено: {len(file_issues)} (Крит: {err_count})")
+                # --- ПОЛИМОРФНЫЙ ЗАПУСК ВАЛИДАТОРОВ ---
+                api_called = False
+                
+                # Инициализация списка для сбора ошибок текущего файла
+                # #### (Затыкаем дырку: теперь переменная точно объявлена)
+                file_issues = [] 
 
-                if idx < self.stats["total_files"]:
-                    time.sleep(self.delay)
+                for validator in self.validators:
+                    try:
+                        # Получаем список проблем от конкретного валидатора
+                        issues = validator.check(path, content, ext)
+                        
+                        # Если проблемы найдены — добавляем их в общий список файла
+                        if issues:
+                            file_issues.extend(issues)
+                        
+                        # Проверяем, нужно ли делать паузу (только для внешних API)
+                        if validator.enabled and isinstance(validator, (W3CValidator, GeminiValidator)):
+                            api_called = True
+                            
+                    except Exception as e:
+                        logger.error(f"Сбой модуля {validator.name}: {e}")
 
-            except UnicodeDecodeError:
-                print(" ❌ Skipped (Binary)")
+                # Сохранение результата в отчет
+                # #### (Затыкаем дырку: передаем собранный список)
+                new_report = FileReport(path, datetime.now().strftime("%H:%M"), file_issues)
+                self.reports.append(new_report)
+
+                # Мгновенная запись на диск (защита от вылета на 404.html)
+                try:
+                    with open(self.temp_file, 'w', encoding='utf-8') as f:
+                        json.dump([asdict(r) for r in self.reports], f, ensure_ascii=False)
+                except Exception as e:
+                    logger.error(f"Ошибка сохранения прогресса: {e}")
+                
+                # Вывод статуса в терминал
+                msg_status = "✅ OK" if not file_issues else f"⚠️ {len(file_issues)} issues"
+                print(f" {msg_status}")
+                
+                # Пауза перед следующим файлом (Rate Limiting)
+                # --- УМНАЯ ЗАДЕРЖКА (Rate Limiting) ---
+                if api_called:
+                    sleep_cfg = str(self.cfg['api_sleep'])
+                    
+                    if "_" in sleep_cfg:
+                        # Если формат 7_10, выбираем рандомное число
+                        try:
+                            low, high = map(float, sleep_cfg.split("_"))
+                            sleep_time = random.uniform(low, high)
+                        except Exception:
+                            sleep_time = 10.0 # Страховка, если в .env написали дичь
+                    else:
+                        # Если просто число (например 10.0)
+                        try:
+                            sleep_time = float(sleep_cfg)
+                        except Exception:
+                            sleep_time = 10.0
+
+                    print(f" ⏳ Пауза {sleep_time:.1f}с...")
+                    time.sleep(sleep_time)
+
             except Exception as e:
-                print(f" ❌ Error: {e}")
+                print(f"\n❌ ФАТАЛЬНАЯ ОШИБКА ФАЙЛА {path}: {e}")
+                logger.exception(e)
+        
+        self.generate_report()
+        # Удаляем временный файл только если все прошло успешно
+        if os.path.exists(self.temp_file): 
+            os.remove(self.temp_file)
+            print("🧹 Временный файл очищен.")
 
     def generate_report(self):
-        """Генерирует HTML отчет."""
-        report_path = self.config['report_file']
-        
-        html_template = f"""
+        """Генерация HTML отчета"""
+        stats = {'files': len(self.reports), 'err': 0, 'warn': 0, 'sugg': 0}
+        for r in self.reports:
+            for i in r.issues:
+                if i.type == 'error': stats['err'] += 1
+                elif i.type == 'warning': stats['warn'] += 1
+                elif i.type == 'suggestion': stats['sugg'] += 1
+
+        html = f"""
         <!DOCTYPE html>
         <html lang="ru">
         <head>
             <meta charset="UTF-8">
-            <title>Code Audit Report</title>
+            <title>Code Auditor Report</title>
             <style>
-                :root {{ --bg: #f4f6f9; --white: #ffffff; --text: #2d3748; --danger: #e53e3e; --warn: #dd6b20; --info: #3182ce; --success: #38a169; }}
-                body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); padding: 40px; line-height: 1.6; }}
-                .container {{ max-width: 1000px; margin: 0 auto; }}
-                h1 {{ color: #1a202c; border-bottom: 2px solid #cbd5e0; padding-bottom: 15px; }}
-                .stats-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 40px; }}
-                .stat-card {{ background: var(--white); padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); text-align: center; }}
-                .stat-value {{ font-size: 2.5rem; font-weight: bold; }}
-                .stat-label {{ color: #718096; text-transform: uppercase; font-size: 0.875rem; letter-spacing: 1px; }}
-                .c-error {{ color: var(--danger); }} .c-warn {{ color: var(--warn); }}
-                .file-block {{ background: var(--white); border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; overflow: hidden; }}
-                .file-header {{ padding: 15px 20px; background: #edf2f7; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: center; font-weight: 600; font-family: monospace; }}
-                .clean-file {{ border-left: 5px solid var(--success); }}
-                .dirty-file {{ border-left: 5px solid var(--danger); }}
-                .issues-list {{ list-style: none; padding: 0; margin: 0; }}
-                .issue-item {{ padding: 15px 20px; border-bottom: 1px solid #edf2f7; display: flex; gap: 15px; }}
-                .issue-item:last-child {{ border-bottom: none; }}
-                .badge {{ padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; text-transform: uppercase; height: fit-content; }}
-                .badge-error {{ background: #fed7d7; color: #9b2c2c; }}
-                .badge-warning {{ background: #feebc8; color: #9c4221; }}
-                .badge-suggestion {{ background: #bee3f8; color: #2c5282; }}
-                .badge-source {{ background: #e2e8f0; color: #4a5568; margin-left: auto; }}
-                .issue-line {{ font-family: monospace; font-weight: bold; color: #718096; min-width: 60px; }}
-                .issue-content {{ flex-grow: 1; }}
-                .issue-fix {{ display: block; margin-top: 5px; color: #4a5568; font-size: 0.9em; background: #f7fafc; padding: 8px; border-radius: 4px; }}
+                :root {{ --bg: #f1f5f9; --card: #ffffff; --text: #334155; --err: #ef4444; --warn: #f59e0b; --info: #3b82f6; }}
+                body {{ font-family: 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); padding: 40px; }}
+                .container {{ max-width: 1200px; margin: 0 auto; }}
+                .stats {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 30px; }}
+                .stat-card {{ background: var(--card); padding: 20px; border-radius: 12px; text-align: center; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }}
+                .stat-val {{ font-size: 2.5rem; font-weight: 800; display: block; }}
+                
+                .file-block {{ background: var(--card); border-radius: 12px; margin-bottom: 20px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+                .file-header {{ padding: 15px 25px; background: #e2e8f0; display: flex; justify-content: space-between; font-weight: 600; }}
+                .clean {{ border-left: 6px solid #22c55e; }}
+                .dirty {{ border-left: 6px solid var(--err); }}
+                
+                .issue {{ padding: 15px 25px; border-bottom: 1px solid #f1f5f9; display: flex; gap: 20px; align-items: flex-start; }}
+                .badge {{ padding: 4px 10px; border-radius: 6px; font-size: 0.75rem; font-weight: 800; text-transform: uppercase; min-width: 70px; text-align: center; }}
+                .b-error {{ background: #fee2e2; color: #991b1b; }}
+                .b-warning {{ background: #fef3c7; color: #92400e; }}
+                .b-suggestion {{ background: #dbeafe; color: #1e40af; }}
+                .source {{ background: #f1f5f9; border: 1px solid #cbd5e1; color: #64748b; margin-left: auto; }}
+                .fix {{ margin-top: 8px; background: #f8fafc; border-left: 4px solid var(--info); padding: 10px; font-size: 0.9rem; }}
             </style>
         </head>
         <body>
             <div class="container">
-                <h1>🛡️ Отчет аудита кода</h1>
-                <p>Дата проверки: {datetime.now().strftime("%d.%m.%Y %H:%M")}</p>
-                <div class="stats-grid">
-                    <div class="stat-card"><div class="stat-value">{self.stats['total_files']}</div><div class="stat-label">Файлов</div></div>
-                    <div class="stat-card"><div class="stat-value c-error">{self.stats.get('errors', 0)}</div><div class="stat-label">Ошибок</div></div>
-                    <div class="stat-card"><div class="stat-value c-warn">{self.stats.get('warnings', 0)}</div><div class="stat-label">Варнингов</div></div>
-                    <div class="stat-card"><div class="stat-value" style="color:#3182ce">{self.stats.get('suggestions', 0)}</div><div class="stat-label">Советов</div></div>
+                <h1>🛡️ CODE AUDITOR REPORT</h1>
+                <p>Дата проверки: {datetime.now().strftime("%Y-%m-%d %H:%M")}</p>
+                <div class="stats">
+                    <div class="stat-card"><span class="stat-val">{stats['files']}</span>Файлов</div>
+                    <div class="stat-card"><span class="stat-val" style="color:var(--err)">{stats['err']}</span>Ошибок</div>
+                    <div class="stat-card"><span class="stat-val" style="color:var(--warn)">{stats['warn']}</span>Варнингов</div>
+                    <div class="stat-card"><span class="stat-val" style="color:var(--info)">{stats['sugg']}</span>Советов</div>
                 </div>
-                <h2>Детализация по файлам</h2>
         """
 
-        for res in self.results:
-            issues = res['issues']
-            has_issues = len(issues) > 0
-            is_clean = not has_issues
-            status_class = "clean-file" if is_clean else "dirty-file"
+        # Сортировка: Сначала проблемные файлы
+        self.reports.sort(key=lambda x: len(x.issues) == 0)
+
+        for rep in self.reports:
+            is_clean = len(rep.issues) == 0
+            status = "clean" if is_clean else "dirty"
             
-            html_template += f"""
-            <div class="file-block {status_class}">
-                <div class="file-header">
-                    <span>{res['path']}</span>
-                    <span>{'✅ Clean' if is_clean else f'🛑 {len(issues)} Issues'}</span>
+            html += f"""
+            <div class="file-block">
+                <div class="file-header {status}">
+                    <span>{rep.path}</span>
+                    <span>{'✅ Clean' if is_clean else f'🛑 {len(rep.issues)} Issues'}</span>
                 </div>
             """
             
-            if has_issues:
-                html_template += '<ul class="issues-list">'
-                sorted_issues = sorted(issues, key=lambda x: 0 if x.get('type') == 'error' else 1)
-                
-                for i in sorted_issues:
-                    i_type = i.get('type', 'warning')
-                    html_template += f"""
-                    <li class="issue-item">
-                        <span class="badge badge-{i_type}">{i_type}</span>
-                        <span class="issue-line">L:{i.get('line', '?')}</span>
-                        <div class="issue-content">
-                            <div class="issue-desc">{i.get('message')}</div>
-                            {f'<span class="issue-fix">💡 {i.get("suggestion")}</span>' if i.get('suggestion') else ''}
+            if not is_clean:
+                # Сортировка ошибок внутри файла
+                rep.issues.sort(key=lambda x: {'error': 0, 'warning': 1, 'suggestion': 2}.get(x.type, 3))
+                for i in rep.issues:
+                    html += f"""
+                    <div class="issue">
+                        <span class="badge b-{i.type}">{i.type}</span>
+                        <span style="font-family:monospace; font-weight:bold; color:#64748b">L:{i.line}</span>
+                        <div style="flex-grow:1">
+                            <div>{i.message}</div>
+                            {f'<div class="fix">💡 {i.suggestion}</div>' if i.suggestion else ''}
                         </div>
-                        <span class="badge badge-source">{i.get('source', 'AI')}</span>
-                    </li>
+                        <span class="badge source">{i.source}</span>
+                    </div>
                     """
-                html_template += '</ul>'
-            html_template += "</div>"
-        
-        html_template += "</div></body></html>"
-        
-        try:
-            with open(report_path, "w", encoding="utf-8") as f:
-                f.write(html_template)
-            print(f"\n✨ Отчет успешно сгенерирован: {os.path.abspath(report_path)}")
-        except Exception as e:
-            logger.error(f"Не удалось записать отчет: {e}")
+            html += "</div>"
+
+        html += "</div></body></html>"
+        with open("code_auditor_report.html", "w", encoding="utf-8") as f:
+            f.write(html)
+        print(f"\n✨ ОТЧЕТ ГОТОВ: code_auditor_report.html")
 
 if __name__ == "__main__":
-    print("--- ЗАПУСК CODE AUDITOR 2.1 ---")
-    auditor = CodeAuditor(API_KEY, CONFIG)
-    auditor.run_pipeline()
-    auditor.generate_report()
+    AuditEngine().run()
