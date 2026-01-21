@@ -1,85 +1,78 @@
-# code_auditor
-Automated code audit and optimization.
 ```
 =====================================================================
-          GEMINI CODE QUALITY AUDITOR (v2.0) - README FILE
+          CODE QUALITY AUDITOR - README FILE
 =====================================================================
 ```
+===============================================================================
+                         CODE AUDITOR v1.0 [PRO VERSION]
+                      (C) 198X-2026 GEMINI AI SYSTEMS CORP.
+===============================================================================
 
-1. DESCRIPTION
---------------
-This script is an automated Code Quality Pipeline designed for 
-modern web development. It acts as a "Virtual Senior Developer" 
-by combining two powerful auditing methods:
+[ОПИСАНИЕ СИСТЕМЫ]
+------------------
+CODE AUDITOR — это высокопроизводительный программный комплекс для глубокого 
+[cite_start]анализа исходного кода[cite: 1]. Система совмещает классическую проверку 
+стандартов W3C с экспертным анализом на базе нейросетевых алгоритмов 
+[cite_start]Gemini AI[cite: 1].
 
-A) AI ANALYSIS: Uses Google Gemini 1.5 Flash to detect logic bugs, 
-   security vulnerabilities (XSS, SQLi), and Clean Code violations.
-B) W3C VALIDATION: Connects to official W3C servers to verify 
-   HTML and CSS syntax compliance.
+[ОСНОВНЫЕ ХАРАКТЕРИСТИКИ]
+-------------------------
+* [cite_start]АРХИТЕКТУРА: Модульная (Plugin-based) с изоляцией ошибок[cite: 1].
+* [cite_start]ИНТЕЛЛЕКТ: Использование Gemini AI для поиска логических багов и XSS[cite: 1].
+* [cite_start]СТАНДАРТЫ: Полная поддержка W3C API для HTML и CSS[cite: 1].
+* [cite_start]ЗАЩИТА: Автоматическое сохранение состояния (State Persistence)[cite: 1].
+* [cite_start]КОНТРОЛЬ: Гибкая фильтрация типов файлов через конфигурацию[cite: 1].
 
-The final output is a professional, interactive HTML report 
-containing all found issues and suggestions for fixing them.
+[ТЕХНИЧЕСКИЕ ТРЕБОВАНИЯ]
+------------------------
+* [cite_start]Операционная система: Любая с поддержкой Python 3.9+[cite: 1].
+* [cite_start]Библиотеки: google-genai, requests, python-dotenv[cite: 1].
+* [cite_start]Сеть: Требуется доступ к портам 80/443 для работы с API[cite: 1].
 
+[ПРИМЕР ФАЙЛА КОНФИГУРАЦИИ (.ENV)]
+----------------------------------
+Создайте файл .ENV в корневом каталоге со следующим содержимым:
 
-2. SYSTEM REQUIREMENTS
-----------------------
-* Python 3.9 or higher.
-* An active Internet connection (for AI and W3C APIs).
-* A Google Gemini API Key (get it at: https://aistudio.google.com/).
+  GEMINI_API_KEY=AIzaSyA... (Ваш ключ из Google AI Studio)
+  GEMINI_MODEL=models/gemini-2.0-flash
+  SOURCE_DIR=src
+  ENABLE_W3C=True
+  ENABLE_GEMINI=True
+  CHECK_HYPERTEXT=True
+  CHECK_STYLES=True
+  CHECK_SCRIPTS=True
+  API_SLEEP=7_15
 
+[ИНСТРУКЦИЯ ПО ИСПОЛЬЗОВАНИЮ]
+-----------------------------
+1. ПОДГОТОВКА: Убедитесь, что исходный код находится в папке, указанной 
+   в SOURCE_DIR (например, /src).
+2. [cite_start]ЗАПУСК: Выполните команду "PYTHON CODE_AUDITOR.PY"[cite: 1].
+3. ПРОЦЕСС: Программа начнет сканирование. Если файл 404.html или другой 
+   [cite_start]вызовет сбой, прогресс будет сохранен в AUDIT_STATE.TEMP.JSON[cite: 1].
+4. ПАУЗА: Между запросами система делает паузу (API_SLEEP), чтобы избежать 
+   [cite_start]блокировки со стороны W3C или лимитов Gemini[cite: 1].
+5. РЕЗУЛЬТАТ: Проверьте файл CODE_AUDITOR_REPORT.HTML для просмотра 
+   [cite_start]найденных ошибок и советов по исправлению[cite: 1].
 
-3. INSTALLATION
----------------
-Open your terminal or command prompt and install the 
-required libraries:
+[ПРИМЕР ТЕРМИНАЛЬНОГО ВЫВОДА]
+-----------------------------
+🚀 ЗАПУСК CODE AUDITOR...
+📂 Источник (Source): src
+⏱ Задержка (Sleep): 7_15 сек.
+👉 [1/10] index.html... ✅ OK
+👉 [2/10] styles.css... ⚠️ 2 issues ⏳ Пауза 12.4с...
+👉 [3/10] app.js... 🛑 1 issues ⏳ Пауза 8.2с...
+✨ ОТЧЕТ ГОТОВ: code_auditor_report.html
 
-   pip install google-genai requests python-dotenv
+[МАТРИЦА ПРОВЕРОК]
+------------------
+ФАЙЛЫ       | W3C ВАЛИДАТОР | GEMINI AI АНАЛИЗ | КОММЕНТАРИЙ
+------------|---------------|------------------|---------------------------
+.HTML       |     ДА        |       ДА         | [cite_start]Семантика и структура [cite: 1]
+.CSS/.SCSS  |     ДА        |       ДА         | [cite_start]Стили и вложенность [cite: 1]
+.JS/.TS     |     НЕТ       |       ДА         | [cite_start]Логика и безопасность [cite: 1]
 
-
-4. CONFIGURATION
-----------------
-Before running the script, you must provide your API Key.
-You have two ways to do this:
-
-A) Environment Variable: Create a file named ".env" in the 
-   script folder and add:
-   GEMINI_API_KEY=your_key_here
-
-B) Direct Edit: Open "code_auditor.py" and replace the placeholder
-   value in the API_KEY variable (line 30).
-
-
-5. HOW TO USE
--------------
-1. Place the "code_auditor.py" script in your project's root 
-   directory.
-2. Ensure your source code is in a folder named "src" 
-   (you can change this folder name in the CONFIG section 
-   inside the script).
-3. Run the script:
-
-   python code_auditor.py
-
-4. Wait for the process to finish. It respects API rate limits 
-   (15 requests per minute) so it may take some time for 
-   large projects.
-
-
-6. OUTPUT
----------
-Once finished, the script will generate a file:
-"audit_report.html"
-
-Open this file in any web browser to see the detailed 
-results of the audit.
-
-
-7. FILE TYPES SUPPORTED
------------------------
-The script scans for: .html, .css, .js, .jsx, .ts, .tsx, .scss
-
-```
-=====================================================================
-       (c) 2024-2026 - POWERED BY GEMINI AI - QUALITY FIRST
-=====================================================================
-```
+===============================================================================
+                     КОНЕЦ ДОКУМЕНТА. СИСТЕМА ГОТОВА.
+===============================================================================
