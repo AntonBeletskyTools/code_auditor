@@ -54,6 +54,9 @@ CHECK_SCRIPTS=True
 # ВАЖНО: W3C может забанить IP при слишком частых запросах. 
 # 7_15 секунд — безопасный интервал для стабильной работы. рандом между 7 и 15 секундами
 API_SLEEP=7_15
+
+# Максимальное количество символов кода для отправки в Gemini
+GEMINI_MAX_CHARS=30000
 ==============================================================================
 """
 
@@ -178,10 +181,10 @@ class W3CValidator(BaseValidator):
 class GeminiValidator(BaseValidator):
     """Модуль интеллектуального анализа (AI)"""
 
-    def __init__(self, enabled: bool, api_key: str, model: str):
+    def __init__(self, enabled: bool, api_key: str, model: str, max_chars: int = 30000):
         super().__init__(name="Gemini AI", enabled=enabled)
         self.model = model
-        self.client = None
+        self.max_chars = max_chars
         
         if self.enabled:
             if not api_key:
@@ -227,7 +230,7 @@ class GeminiValidator(BaseValidator):
         }}
         
         CODE:
-        {content[:30000]}
+        {content[:self.max_chars]}
         """
 
         try:
@@ -277,7 +280,8 @@ class AuditEngine:
         self.validators.append(GeminiValidator(
             enabled=self.cfg['gemini_on'], 
             api_key=self.cfg['api_key'], 
-            model=self.cfg['model']
+            model=self.cfg['model'],
+            max_chars=self.cfg['gemini_max_chars']max_chars=self.cfg['gemini_max_chars']
         ))
 
     def load_config(self):
@@ -293,7 +297,8 @@ class AuditEngine:
             'filter_html': get_bool("CHECK_HYPERTEXT"),
             'filter_css': get_bool("CHECK_STYLES"),
             'filter_js': get_bool("CHECK_SCRIPTS"),
-            'api_sleep': os.getenv("API_SLEEP", "10.0"), # Дефолт из запроса пользователя
+            'api_sleep': os.getenv("API_SLEEP", "10.0"),
+            'gemini_max_chars': int(os.getenv("GEMINI_MAX_CHARS", "30000")),
         }
 
     def print_config(self):
@@ -303,6 +308,7 @@ class AuditEngine:
         print("="*50)
         print(f"📂 Источник (Source):   {self.cfg['src']}")
         print(f"🤖 AI Модель:           {self.cfg['model']}")
+        print(f"📄 Лимит символов AI:   {self.cfg['gemini_max_chars']}")
         print(f"⏱  Задержка (Sleep):    {self.cfg['api_sleep']} сек.")
         print("-" * 50)
         print(f"🔌 Модули:")
