@@ -1,5 +1,5 @@
 """
-GEMINI CODE QUALITY AUDITOR (v2.0 - Production Ready)
+GEMINI CODE QUALITY AUDITOR (v2.1 - Production Ready)
 =====================================================
 Инструмент для автоматизированного аудита кода с использованием AI и W3C.
 
@@ -7,9 +7,8 @@ GEMINI CODE QUALITY AUDITOR (v2.0 - Production Ready)
     pip install google-genai requests python-dotenv
 
 Использование:
-    1. Создайте файл .env и добавьте туда: GEMINI_API_KEY=ваш_ключ
-    2. Или вставьте ключ в переменную API_KEY ниже (менее безопасно).
-    3. Запустите: python code_auditor.py
+    1. Создайте файл .env: GEMINI_API_KEY=ваш_ключ
+    2. Запустите: python code_auditor.py
 """
 
 import os
@@ -21,24 +20,31 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Any
 
-# Попытка импорта новой SDK Google. Если нет - ошибка будет понятной.
+# --- Инициализация окружения (.env) ---
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # Загружает переменные из файла .env
+except ImportError:
+    print("⚠️ Библиотека 'python-dotenv' не найдена. Переменные из .env не будут загружены.")
+
+# Попытка импорта SDK Google
 try:
     from google import genai
     from google.genai import types
 except ImportError:
     print("CRITICAL ERROR: Библиотека 'google-genai' не установлена.")
-    print("Запустите: pip install google-genai")
+    print("Запустите: pip install google-genai requests python-dotenv")
     exit(1)
 
 # ================= КОНФИГУРАЦИЯ =================
-# Приоритет: Переменная окружения -> Хардкод
-API_KEY = os.getenv("GEMINI_API_KEY", "ВСТАВЬТЕ_СЮДА_ВАШ_КЛЮЧ_ЕСЛИ_НЕТ_ENV")
+# Скрипт сначала ищет ключ в .env, затем в системных переменных
+API_KEY = os.getenv("GEMINI_API_KEY")
 
 CONFIG = {
     "source_dir": "src",              # Папка с исходным кодом
     "report_file": "audit_report.html", # Имя файла отчета
-    "model_name": "gemini-1.5-flash",   # Актуальная быстрая модель
-    "extensions": ('.html', '.css', '.js', '.jsx', '.ts', '.tsx', '.scss'), # Расширенный список
+    "model_name": "gemini-3-flash-preview",   # Актуальная быстрая модель
+    "extensions": ('.html', '.css', '.js', '.jsx', '.ts', '.tsx', '.scss'),
     "rpm_limit": 15,                    # Лимит запросов в минуту (Free Tier)
     "w3c_enabled": True                 # Включить классическую валидацию
 }
@@ -52,8 +58,8 @@ class CodeAuditor:
     Класс-оркестратор для проверки качества кода.
     """
     def __init__(self, api_key: str, config: Dict):
-        if not api_key or "ВСТАВЬТЕ" in api_key:
-            raise ValueError("❌ API Key не найден! Установите GEMINI_API_KEY в .env или в скрипте.")
+        if not api_key:
+            raise ValueError("❌ API Key не найден! Убедитесь, что файл .env создан и содержит GEMINI_API_KEY.")
         
         self.client = genai.Client(api_key=api_key)
         self.config = config
@@ -81,7 +87,7 @@ class CodeAuditor:
         logger.info(f"Найдено файлов для анализа: {self.stats['total_files']}")
 
     def _clean_json_response(self, text: str) -> str:
-        """Очищает ответ AI от Markdown-оберток (```json ... ```)."""
+        """Очищает ответ AI от Markdown-оберток."""
         cleaned = re.sub(r"^```json\s*", "", text, flags=re.MULTILINE)
         cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.MULTILINE)
         return cleaned.strip()
@@ -91,16 +97,14 @@ class CodeAuditor:
         if not self.config['w3c_enabled'] or ext not in ['.html', '.css']:
             return []
 
-        # W3C Nu Validator API
-        url = "[https://validator.w3.org/nu/?out=json](https://validator.w3.org/nu/?out=json)"
+        url = "https://validator.w3.org/nu/?out=json"
         content_type = "text/html" if ext == '.html' else "text/css"
-        headers = {'User-Agent': 'CodeAuditor/2.0', 'Content-Type': f'{content_type}; charset=utf-8'}
+        headers = {'User-Agent': 'CodeAuditor/2.1', 'Content-Type': f'{content_type}; charset=utf-8'}
 
         try:
             resp = requests.post(url, data=content.encode('utf-8'), headers=headers, timeout=10)
             if resp.status_code == 200:
                 messages = resp.json().get('messages', [])
-                # Преобразуем формат W3C в наш формат
                 return [{
                     "type": "error" if m.get('type') == 'error' else "warning",
                     "line": m.get('lastLine', 0),
@@ -140,7 +144,6 @@ class CodeAuditor:
         КОД:
         {content[:30000]} 
         """
-        # Обрезаем контент, если файл гигантский, чтобы влезть в контекст (30к символов ~ 7-8к токенов)
 
         max_retries = 3
         for attempt in range(max_retries):
@@ -154,7 +157,6 @@ class CodeAuditor:
                 raw_text = self._clean_json_response(response.text)
                 data = json.loads(raw_text)
                 
-                # Добавляем метку источника
                 issues = data.get("issues", [])
                 for i in issues:
                     i["source"] = "Gemini AI"
@@ -169,7 +171,6 @@ class CodeAuditor:
                 else:
                     logger.error(f"Ошибка AI анализа для {file_path}: {e}")
                     return []
-        
         return []
 
     def run_pipeline(self):
@@ -206,7 +207,7 @@ class CodeAuditor:
 
                 # Агрегация статистики
                 for issue in file_issues:
-                    key = f"{issue.get('type', 'warning')}s" # errors/warnings/suggestions
+                    key = f"{issue.get('type', 'warning')}s"
                     self.stats[key] = self.stats.get(key, 0) + 1
 
                 self.results.append({
@@ -214,14 +215,12 @@ class CodeAuditor:
                     "issues": file_issues
                 })
                 
-                # Визуальный фидбек
                 if not file_issues:
                     print(" ✅ OK")
                 else:
                     err_count = sum(1 for i in file_issues if i['type'] == 'error')
                     print(f" ⚠️ Найдено: {len(file_issues)} (Крит: {err_count})")
 
-                # Соблюдение лимитов
                 if idx < self.stats["total_files"]:
                     time.sleep(self.delay)
 
@@ -231,10 +230,9 @@ class CodeAuditor:
                 print(f" ❌ Error: {e}")
 
     def generate_report(self):
-        """Генерирует современный HTML отчет."""
+        """Генерирует HTML отчет."""
         report_path = self.config['report_file']
         
-        # HTML Шаблон (CSS внутри)
         html_template = f"""
         <!DOCTYPE html>
         <html lang="ru">
@@ -246,31 +244,25 @@ class CodeAuditor:
                 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); padding: 40px; line-height: 1.6; }}
                 .container {{ max-width: 1000px; margin: 0 auto; }}
                 h1 {{ color: #1a202c; border-bottom: 2px solid #cbd5e0; padding-bottom: 15px; }}
-                
                 .stats-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 40px; }}
                 .stat-card {{ background: var(--white); padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); text-align: center; }}
                 .stat-value {{ font-size: 2.5rem; font-weight: bold; }}
                 .stat-label {{ color: #718096; text-transform: uppercase; font-size: 0.875rem; letter-spacing: 1px; }}
                 .c-error {{ color: var(--danger); }} .c-warn {{ color: var(--warn); }}
-                
                 .file-block {{ background: var(--white); border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; overflow: hidden; }}
                 .file-header {{ padding: 15px 20px; background: #edf2f7; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: center; font-weight: 600; font-family: monospace; }}
                 .clean-file {{ border-left: 5px solid var(--success); }}
                 .dirty-file {{ border-left: 5px solid var(--danger); }}
-                
                 .issues-list {{ list-style: none; padding: 0; margin: 0; }}
                 .issue-item {{ padding: 15px 20px; border-bottom: 1px solid #edf2f7; display: flex; gap: 15px; }}
                 .issue-item:last-child {{ border-bottom: none; }}
-                
                 .badge {{ padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; text-transform: uppercase; height: fit-content; }}
                 .badge-error {{ background: #fed7d7; color: #9b2c2c; }}
                 .badge-warning {{ background: #feebc8; color: #9c4221; }}
                 .badge-suggestion {{ background: #bee3f8; color: #2c5282; }}
                 .badge-source {{ background: #e2e8f0; color: #4a5568; margin-left: auto; }}
-                
                 .issue-line {{ font-family: monospace; font-weight: bold; color: #718096; min-width: 60px; }}
                 .issue-content {{ flex-grow: 1; }}
-                .issue-desc {{ font-weight: 500; }}
                 .issue-fix {{ display: block; margin-top: 5px; color: #4a5568; font-size: 0.9em; background: #f7fafc; padding: 8px; border-radius: 4px; }}
             </style>
         </head>
@@ -278,14 +270,12 @@ class CodeAuditor:
             <div class="container">
                 <h1>🛡️ Отчет аудита кода</h1>
                 <p>Дата проверки: {datetime.now().strftime("%d.%m.%Y %H:%M")}</p>
-                
                 <div class="stats-grid">
                     <div class="stat-card"><div class="stat-value">{self.stats['total_files']}</div><div class="stat-label">Файлов</div></div>
                     <div class="stat-card"><div class="stat-value c-error">{self.stats.get('errors', 0)}</div><div class="stat-label">Ошибок</div></div>
                     <div class="stat-card"><div class="stat-value c-warn">{self.stats.get('warnings', 0)}</div><div class="stat-label">Варнингов</div></div>
                     <div class="stat-card"><div class="stat-value" style="color:#3182ce">{self.stats.get('suggestions', 0)}</div><div class="stat-label">Советов</div></div>
                 </div>
-
                 <h2>Детализация по файлам</h2>
         """
 
@@ -305,7 +295,6 @@ class CodeAuditor:
             
             if has_issues:
                 html_template += '<ul class="issues-list">'
-                # Сортировка: Сначала ошибки, потом остальное
                 sorted_issues = sorted(issues, key=lambda x: 0 if x.get('type') == 'error' else 1)
                 
                 for i in sorted_issues:
@@ -322,14 +311,9 @@ class CodeAuditor:
                     </li>
                     """
                 html_template += '</ul>'
-            
             html_template += "</div>"
-
-        html_template += """
-            </div>
-        </body>
-        </html>
-        """
+        
+        html_template += "</div></body></html>"
         
         try:
             with open(report_path, "w", encoding="utf-8") as f:
@@ -338,14 +322,8 @@ class CodeAuditor:
         except Exception as e:
             logger.error(f"Не удалось записать отчет: {e}")
 
-# ================= ЗАПУСК =================
 if __name__ == "__main__":
-    # Пример использования
-    # 1. Убедитесь, что папка 'src' существует.
-    # 2. Установите зависимости.
-    
-    print("--- ЗАПУСК CODE AUDITOR 2.0 ---")
-    
+    print("--- ЗАПУСК CODE AUDITOR 2.1 ---")
     auditor = CodeAuditor(API_KEY, CONFIG)
     auditor.run_pipeline()
     auditor.generate_report()
