@@ -200,6 +200,18 @@ class GeminiValidator(BaseValidator):
     def check(self, path: str, content: str, ext: str) -> List[Issue]:
         if not self.enabled or not self.client:
             return []
+
+        issues = []
+        # Проверка на превышение лимита символов
+        if len(content) > self.max_chars:
+            msg = f"Файл слишком велик ({len(content)} симв.). Анализируются только первые {self.max_chars}."
+            logger.warning(f"[{self.name}] {path}: {msg}")
+            issues.append(Issue(
+                type="warning",
+                line=0,
+                message=f"⚠️ {msg}",
+                source=self.name
+            ))
         
         # Формируем контекст для ИИ
         context = "код"
@@ -244,13 +256,15 @@ class GeminiValidator(BaseValidator):
             clean_json = re.sub(r"^```json\s*|\s*```$", "", response.text, flags=re.MULTILINE).strip()
             data = json.loads(clean_json)
             
-            return [Issue(
+            ai_issues = [Issue(
                 type=i.get('type', 'warning'),
                 line=i.get('line', 0),
                 message=i.get('message', 'Issue detected'),
                 source=self.name,
                 suggestion=i.get('suggestion')
             ) for i in data.get('issues', [])]
+            
+            return issues + ai_issues
 
         except Exception as e:
             if "429" in str(e):
