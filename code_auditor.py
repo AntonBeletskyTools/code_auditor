@@ -377,7 +377,7 @@ class AuditEngine:
             except Exception:
                 return []
         return []
-
+    
     def save_state(self):
         """Инкрементальное сохранение"""
         with open(self.temp_file, 'w', encoding='utf-8') as f:
