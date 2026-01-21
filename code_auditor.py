@@ -411,25 +411,20 @@ class AuditEngine:
             print(f"⚠️  Файлы для проверки не найдены в '{self.cfg['src']}'. Проверьте настройки фильтров или пути.")
             return
 
-        # 2. Восстанавливаем состояние (если включена докачка)
+       # 2. Управление состоянием (Resume Logic)
         if self.cfg['resume_audit']:
             self.reports = self.restore_state()
             processed_paths = {r.path for r in self.reports}
             if processed_paths:
-                print(f"🔄 Режим докачки: Пропускаем {len(processed_paths)} уже проверенных файлов.")
+                print(f"🔄 Режим докачки: Найдено {len(processed_paths)} проверенных файлов.")
         else:
             self.reports = []
             processed_paths = set()
-            # Если докачка выключена, но старый файл есть — удаляем его для чистого старта
             if os.path.exists(self.temp_file):
                 os.remove(self.temp_file)
+                print("🧹 Старый прогресс удален (чистый старт).")
         
-        # Принудительно загружаем старые отчеты в список перед началом
-        # 2.1. Сначала загружаем объекты отчетов в self.reports
-        self.reports = self.restore_state() 
-        # 2.2. Создаем множество ПУТЕЙ из этих отчетов
-        processed_paths = {r.path for r in self.reports}
-        # 2.3. Формируем очередь из тех файлов, путей которых НЕТ в списке проверенных
+        # Сразу формируем очередь из оставшихся файлов
         queue = [f for f in all_files if f not in processed_paths]
         
         # 3. Вывод статистики ПЕРЕД работой
