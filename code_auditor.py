@@ -295,7 +295,7 @@ class AuditEngine:
             enabled=self.cfg['gemini_on'], 
             api_key=self.cfg['api_key'], 
             model=self.cfg['model'],
-            max_chars=self.cfg['gemini_max_chars']max_chars=self.cfg['gemini_max_chars']
+            max_chars=self.cfg['gemini_max_chars']
         ))
 
     def load_config(self):
