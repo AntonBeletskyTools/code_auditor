@@ -43,7 +43,7 @@ API_KEY = os.getenv("GEMINI_API_KEY")
 CONFIG = {
     "source_dir": "src",              # Папка с исходным кодом
     "report_file": "audit_report.html", # Имя файла отчета
-    "model_name": "gemini-1.5-flash",   # Актуальная быстрая модель
+    "model_name": "gemini-3-flash-preview",   # Актуальная быстрая модель
     "extensions": ('.html', '.css', '.js', '.jsx', '.ts', '.tsx', '.scss'),
     "rpm_limit": 15,                    # Лимит запросов в минуту (Free Tier)
     "w3c_enabled": True                 # Включить классическую валидацию
