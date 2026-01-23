@@ -700,25 +700,36 @@ class AuditEngine:
                     print(f" ✅ Clean [{', '.join(checked_by_modules)}]")
                 else:
                     print(f" ⚠️ {len(file_issues)} issues")
-
+                    
                 if api_called:
-                    sleep_cfg = str(self.cfg['api_sleep']).replace(" ", "") # Убираем пробелы
-                    if "," in sleep_cfg: # Проверяем наличие запятой
+                    # Читаем конфигурацию и очищаем от лишних символов
+                    sleep_cfg = str(self.cfg['api_sleep']).replace(" ", "").replace("\xa0", "")
+                    
+                    if "," in sleep_cfg:
                         try:
-                            # Разбиваем по запятой и преобразуем обе части в float
+                            # Парсим диапазон (например, "3,7")
                             mn, mx = map(float, sleep_cfg.split(","))
                             st = random.uniform(mn, mx)
                         except Exception: 
-                            st = 10.0 # Фоллбэк при ошибке парсинга
+                            st = 10.0
                     else:
                         try:
                             st = float(sleep_cfg)
                         except:
                             st = 10.0
-                    time.sleep(st)
+
+                    # Живой обратный отсчет в одной строке
+                    for remaining in range(int(st), 0, -1):
+                        # \r возвращает курсор в начало строки, flush=True принудительно выводит текст
+                        print(f" ⏳ Ожидание: {remaining}s...   ", end="\r", flush=True)
+                        time.sleep(1)
+                    
+                    # Полная очистка строки перед переходом к следующему файлу
+                    print(" " * 40, end="\r")
 
             except Exception as e:
                 print(f" ❌ Fatal Error: {e}")
+
 
         self.generate_report()
         
