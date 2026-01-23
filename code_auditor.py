@@ -81,6 +81,7 @@ from dataclasses import dataclass, asdict, field
 from typing import List, Optional
 import logging
 
+
 # --- Инициализация окружения ---
 try:
     from dotenv import load_dotenv
@@ -96,8 +97,15 @@ except ImportError:
     exit(1)
 
 # Логирование
-logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s', datefmt='%H:%M:%S')
+#logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s', datefmt='%H:%M:%S')
+# Добавляем -8 к levelname, чтобы зарезервировать 8 символов под имя уровня (Error/Warning/Info)
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s | %(levelname)-8s | %(message)s', 
+    datefmt='%H:%M:%S'
+)
 logger = logging.getLogger("CodeAuditor")
+
 
 # =================  DATA MODELS (OOP) =================
 
@@ -125,8 +133,7 @@ class APIBannedException(Exception):
     """Специальное исключение для сигнализации о блокировке API (429/Quota)"""
     pass
 
-import random
-from typing import Optional
+
 
 # =================   Headers Builder  =================
 
@@ -289,29 +296,27 @@ class W3CValidator(BaseValidator):
 class GeminiValidator(BaseValidator):
     """Модуль интеллектуального анализа (AI)"""
 
-    def __init__(self, enabled: bool, api_key: str, model: str, max_chars: int = 30000):
+        
+    def __init__(self, enabled: bool, api_keys: list, model: str, max_chars: int = 30000, api_sleep=10.0,engine=None):
         super().__init__(name="Gemini AI", short_name="AI", enabled=enabled)
         self.model = model
         self.max_chars = max_chars
-        self.client = None
+        self.api_keys = api_keys # Список всех ключей
+        self.call_count = 0      # Счетчик вызовов
+        self.engine = engine  # Ссылка на движок для логов
+        self.api_sleep = api_sleep  # Пауза между вызовами
+        self.max_attempts = len(api_keys) if api_keys else 0 # Максимум попыток равен числу ключей
         
-        if self.enabled:
-            if not api_key or "YOUR_GEMINI_API_KEY" in api_key:
-                logger.warning(f"\n   Gemini API Key is missing. AI disabled.")
-                self.enabled = False
-            else:
-                try:
-                    self.client = genai.Client(api_key=api_key)
-                except Exception as e:
-                    logger.error(f"\n   Failed to init Gemini: {e}")
-                    self.enabled = False
-
+        if self.enabled and not self.api_keys:
+            logger.warning(f"\n   Gemini API Keys are missing. AI disabled.")
+            self.enabled = False
+        
     def can_check(self, ext: str) -> bool:
         # AI может проверять почти всё, что текстовое
         return ext in ['.html', '.css', '.scss', '.sass', '.js', '.jsx', '.ts', '.tsx']
 
     def check(self, path: str, content: str, ext: str) -> List[Issue]:
-        if not self.enabled or not self.client or not self.can_check(ext):
+        if not self.enabled or not self.can_check(ext):
             return []
 
         issues = []
@@ -349,37 +354,114 @@ class GeminiValidator(BaseValidator):
         {content[:self.max_chars]}
         """
 
-        try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )            
-
-            clean_json = re.sub(r"^```json\s*|\s*```$", "", response.text, flags=re.MULTILINE).strip()
-            data = json.loads(clean_json)
+        # ФОРМУЛА РОТАЦИИ:
+        # Берем индекс по остатку от деления (напр. 9 файлов % 4 ключа)
+        current_idx = self.call_count % len(self.api_keys)
+        current_key = self.api_keys[current_idx]
+        
+        attempts = 0
+        max_attempts = len(self.api_keys) # Пытаемся не больше раз, чем у нас есть ключей
+        
+        while attempts < max_attempts:
+            current_idx = self.call_count % len(self.api_keys)
+            current_key = self.api_keys[current_idx]
             
-            ai_issues = [Issue(
-                type=i.get('type', 'warning'),
-                line=i.get('line', 0),
-                message=i.get('message', 'Issue detected'),
-                source=self.name,
-                suggestion=i.get('suggestion')
-            ) for i in data.get('issues', [])]
-            
-            return issues + ai_issues
+            try:
+                # Создаем клиента именно под выбранный ключ
+                temp_client = genai.Client(api_key=current_key)
 
-        except Exception as e:
-            if "429" in str(e) or "quota" in str(e).lower():
-                self.enabled = False
-                logger.error(f"\n   🛑 [{self.name}] Исчерпана квота. Модуль отключен.")
-                raise APIBannedException(f"{self.name} Quota Exceeded")
-            elif "404" in str(e):
-                self.enabled = False 
-                return [Issue(type="error", line=0, message="Invalid Gemini Model", source=self.name)]
-            else:
-                logger.error(f"\n   [{self.name}] Error: {e}")
-                return [Issue(type="error", line=0, message=f"AI Error: {str(e)[:50]}", source=self.name)]
+                response = temp_client.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )          
+
+                # УСПЕХ: сдвигаем счетчик для СЛЕДУЮЩЕГО файла и выходим из цикла попыток
+                self.call_count += 1
+
+                text_resp = response.text
+                # Ищем фигурные скобки, чтобы вычленить только объект
+                json_match = re.search(r'\{.*\}', text_resp, re.DOTALL) 
+                if json_match:
+                    clean_json = json_match.group(0)
+                else:
+                    # Фоллбэк на старый метод очистки md-тегов
+                    clean_json = re.sub(r"^```json\s*|\s*```$", "", text_resp, flags=re.MULTILINE).strip()
+
+                try:
+                    data = json.loads(clean_json)
+                except json.JSONDecodeError:
+                    # Логирование или пустой список, чтобы не крашить весь процесс
+                    data = {}
+                
+                # Собираем список из JSON
+                ai_list = [Issue(
+                    type=i.get('type', 'warning'),
+                    line=i.get('line', 0),
+                    message=i.get('message', 'Issue detected'),
+                    source=self.name,
+                    suggestion=i.get('suggestion')
+                ) for i in data.get('issues', [])]
+                
+                # Возвращаем всё вместе: и наши локальные issues, и то что прислал ИИ
+                return issues + ai_list
+                    
+            except Exception as e:
+                # ПРИНУДИТЕЛЬНЫЙ ПЕРЕНОС, чтобы логгер не лепил текст к точкам имени файла
+                # тут будет перенос 
+                
+                err_msg = str(e).lower()
+                
+                # 1. Лимит ключа - пробуем следующий ключ
+                if "429" in err_msg or "quota" in err_msg:
+                    # 1. Сначала переходим на новую строку
+                    print() 
+                    
+                    # 2. Берем время из API_SLEEP или дефолт
+                    st = 10.0
+                    if self.engine:
+                        # Парсим API_SLEEP из .env
+                        sleep_cfg = str(self.api_sleep).replace(" ", "")  
+                        try:
+                            if "," in sleep_cfg:
+                                mn, mx = map(float, sleep_cfg.split(","))
+                                st = random.uniform(mn, mx)
+                            else:
+                                st = float(sleep_cfg)
+                        except: st = 10.0
+
+                    # если ключ всего один 
+                    if len(self.api_keys) == 1:
+                        logger.warning(f"  ⚠️ Ключ #{current_idx + 1} исчерпан...")
+                    else:
+                        # 3. Логируем и спим    
+                        logger.warning(f"  ⚠️ Ключ #{current_idx + 1} исчерпан. Пауза {st:.1f}s перед сменой ключа...")
+                        time.sleep(st)
+                    
+                    
+                    self.call_count += 1 
+                    attempts += 1
+                    continue
+
+                # 2. Ошибка модели - выключаем модуль совсем
+                elif "404" in err_msg:
+                    self.enabled = False 
+                    logger.error(f"  ❌ [{self.name}] Неверная модель. ИИ отключен.")
+                    return issues + [Issue(type="error", line=0, message="Неверная модель Gemini", source=self.name)]
+
+                # 3. Все остальные ошибки (сеть, JSON и т.д.)
+                else:
+                    logger.error(f"  ❌ Ошибка ключа #{current_idx + 1}: {e}")
+                    # Пробуем другой ключ при любой ошибке:
+                    self.call_count += 1
+                    attempts += 1
+                    continue
+                
+        # Если цикл закончился, а мы ничего не вернули — значит все ключи сдохли
+        logger.error(f"  💀 Все ключи исчерпаны. Отключаю модуль Gemini.")
+        self.enabled = False # <--- ТЕПЕРЬ МОДЕЛЬ ВЫКЛЮЧИТСЯ СОВСЕМ
+        return issues + [Issue(type="error", line=0, message="Все ключи Gemini достигли лимита квоты. Модуль отключен.", source=self.name)]
+                
 
 class GrokDualValidator(BaseValidator):
     """
@@ -495,9 +577,11 @@ class AuditEngine:
         # Gemini AI Validator
         self.validators.append(GeminiValidator(
             enabled=self.cfg['gemini_on'], 
-            api_key=self.cfg['gemini_key'], 
+            api_keys=self.cfg['gemini_keys'], # Передаем весь список ключей
             model=self.cfg['gemini_model'],
-            max_chars=self.cfg['gemini_max_chars']
+            max_chars=self.cfg['gemini_max_chars'],
+            api_sleep=self.cfg['api_sleep'],
+            engine=self 
         ))
         # Grok Dual Validator
         self.validators.append(GrokDualValidator(
@@ -509,9 +593,16 @@ class AuditEngine:
 
     def load_config(self):
         def get_bool(k, d="True"): return os.getenv(k, d).lower() in ("true", "1", "yes", "on")
+        
+        # берем массив ключей вместо ключа 
+        raw_keys = os.getenv("GEMINI_API_KEY", "0")
+        gemini_keys_list = [k.strip() for k in raw_keys.split(",") if k.strip()]
+        gemini_keys_count = len(gemini_keys_list)
+        
         self.cfg = {
             'src': os.getenv("SOURCE_DIR", "src"),
-            'gemini_key': os.getenv("GEMINI_API_KEY"),
+            'gemini_keys': gemini_keys_list,
+            'gemini_keys_count': gemini_keys_count,
             'gemini_model': os.getenv("GEMINI_MODEL", "models/gemini-2.0-flash"),
             'w3c_on': get_bool("ENABLE_W3C"),
             'gemini_on': get_bool("ENABLE_GEMINI"),
@@ -535,6 +626,7 @@ class AuditEngine:
         print(f"📂 Source:        {self.cfg['src']}")
         print(f"🌐 W3 Validator:  {self.cfg['w3c_on']}")
         print(f"🤖 Gemini Model:  {self.cfg['gemini_model']}")
+        print(f"🔑 Gemini Keys:   {self.cfg['gemini_keys_count']}")
         print(f"🧠 Grok Model:    {self.cfg['grok_model']}")
         print(f"⏱  Sleep:         {self.cfg['api_sleep']}s")
         print(f"🔄 Resume Audit:  {'✅ Yes' if self.cfg['resume_audit'] else '⬜ No'}")
@@ -679,7 +771,7 @@ class AuditEngine:
                             # Модуль только что себя отключил, переходим к следующему в этом файле
                             continue
                         except Exception as ve:
-                            print() # Принудительный переход на новую строку
+                            # print() # Принудительный переход на новую строку
                             logger.error(f"\n   Error {validator.name}: {ve}")
                             
 
