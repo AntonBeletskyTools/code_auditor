@@ -702,8 +702,7 @@ class AuditEngine:
             processed_paths = set()
 
         queue = [f for f in all_files if f not in processed_paths]
-        total_q = len(queue)
-        print(f"📊 Очередь: {total_q} файлов.")
+        print(f"📊 Очередь: {len(queue)} файлов.")
 
         # Указываем желаемую ширину колонки для имени файла 
         FILENAME_WIDTH = 70
@@ -718,7 +717,7 @@ class AuditEngine:
                 # Дополняем точками до фиксированной ширины
                 display_name = filename.ljust(FILENAME_WIDTH, ".")
 
-            print(f"👉 [{idx:>3}/{total_q:<3}] {display_name} ", end="", flush=True)
+            print(f"👉 [{idx}/{len(queue)}] {display_name} ", end="", flush=True)
             
             file_issues = []
             checked_by_modules = [] # Кто реально проверил этот файл
@@ -787,8 +786,7 @@ class AuditEngine:
                 elif not file_issues:
                     print(f" ✅ Clean [{', '.join(checked_by_modules)}]")
                 else:
-                    # Резервируем 3 символа под число ошибок, чтобы текст 'issues' не съезжал
-                    print(f" ⚠️ {len(file_issues):>3} issues")
+                    print(f" ⚠️ {len(file_issues)} issues")
                     
                 if api_called:
                     # Читаем конфигурацию и очищаем от лишних символов
