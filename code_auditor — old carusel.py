@@ -297,7 +297,7 @@ class GeminiValidator(BaseValidator):
     """Модуль интеллектуального анализа (AI)"""
 
         
-    def __init__(self, enabled: bool, api_keys: list, model: str, max_chars: int = 30000, api_sleep=10.0,engine=None, key_rotate=300):
+    def __init__(self, enabled: bool, api_keys: list, model: str, max_chars: int = 30000, api_sleep=10.0,engine=None):
         super().__init__(name="Gemini AI", short_name="AI", enabled=enabled)
         self.model = model
         self.max_chars = max_chars
@@ -306,7 +306,6 @@ class GeminiValidator(BaseValidator):
         self.engine = engine  # Ссылка на движок для логов
         self.api_sleep = api_sleep  # Пауза между вызовами
         self.max_attempts = len(api_keys) if api_keys else 0 # Максимум попыток равен числу ключей
-        self.key_rotate = key_rotate
         
         if self.enabled and not self.api_keys:
             logger.warning(f"\n   Gemini API Keys are missing. AI disabled.")
@@ -358,15 +357,18 @@ class GeminiValidator(BaseValidator):
         {content[:self.max_chars]}
         """
 
-        # новый цикл который юзает ключ пока тот не упадет
-        # --- НОВАЯ ЛОГИКА: ЛИНЕЙНАЯ ОЧЕРЕДЬ (БЕЗ КАРУСЕЛИ) ---
-        # Мы не вычисляем индекс. Мы всегда берем ПЕРВЫЙ доступный ключ [0].
-        # Если он рабочий — используем его вечно.
-        # Если он падает с ошибкой 429 — удаляем его, и следующий становится первым.
+        # ФОРМУЛА РОТАЦИИ:
+        # Берем индекс по остатку от деления (напр. 9 файлов % 4 ключа)
+        current_idx = self.call_count % len(self.api_keys)
+        current_key = self.api_keys[current_idx]
         
-        while self.api_keys: # Пока в списке есть хоть один ключ
+        attempts = 0
+        
+        while attempts < len(self.api_keys):
             
-            current_key = self.api_keys[0] # Всегда берем верхний ключ
+            # ВАЖНО: пересчитываем индекс внутри цикла, так как массив мог уменьшиться
+            current_idx = self.call_count % len(self.api_keys)
+            current_key = self.api_keys[current_idx]
             
             try:
                 # Создаем клиента именно под выбранный ключ
@@ -378,23 +380,25 @@ class GeminiValidator(BaseValidator):
                     config=types.GenerateContentConfig(response_mime_type="application/json")
                 )          
 
-                # УСПЕХ: 
-                self.call_count += 1 # Просто считаем статистику
+                # УСПЕХ: сдвигаем счетчик для СЛЕДУЮЩЕГО файла и выходим из цикла попыток
+                self.call_count += 1
 
                 text_resp = response.text
-                # ... (Далее идет стандартная обработка JSON, оставляем как есть) ...
-                # Ищем фигурные скобки...
+                # Ищем фигурные скобки, чтобы вычленить только объект
                 json_match = re.search(r'\{.*\}', text_resp, re.DOTALL) 
                 if json_match:
                     clean_json = json_match.group(0)
                 else:
+                    # Фоллбэк на старый метод очистки md-тегов
                     clean_json = re.sub(r"^```json\s*|\s*```$", "", text_resp, flags=re.MULTILINE).strip()
 
                 try:
                     data = json.loads(clean_json)
                 except json.JSONDecodeError:
+                    # Логирование или пустой список, чтобы не крашить весь процесс
                     data = {}
                 
+                # Собираем список из JSON
                 ai_list = [Issue(
                     type=i.get('type', 'warning'),
                     line=i.get('line', 0),
@@ -403,38 +407,71 @@ class GeminiValidator(BaseValidator):
                     suggestion=i.get('suggestion')
                 ) for i in data.get('issues', [])]
                 
-                return issues + ai_list # <--- ВЫХОД ИЗ ФУНКЦИИ ПРИ УСПЕХЕ
+                # Возвращаем всё вместе: и наши локальные issues, и то что прислал ИИ
+                return issues + ai_list
                     
             except Exception as e:
+                # ПРИНУДИТЕЛЬНЫЙ ПЕРЕНОС, чтобы логгер не лепил текст к точкам имени файла
+                # тут будет перенос 
+                
                 err_msg = str(e).lower()
                 
-                # 1. Лимит ключа (429/Quota) - УДАЛЯЕМ ТЕКУЩИЙ КЛЮЧ
+                # 1. Лимит ключа - пробуем следующий ключ
                 if "429" in err_msg or "quota" in err_msg:
-                    logger.warning(f"  ⚠️ Ключ ...{current_key[-4:]} исчерпан. Удаляю и беру следующий.")
-                    self.remove_key(current_key) # Удаляем [0], список сдвигается
+                    # Вместо простого пропуска — удаляем ключ совсем
+                    self.remove_key(current_key)
                     
-                    # Если ключей не осталось — прерываем цикл
+                    # 1. Сначала переходим на новую строку
+                    print() 
+                    
+                    # 2. Берем время из API_SLEEP или дефолт
+                    st = 10.0
+                    if self.engine:
+                        # Парсим API_SLEEP из .env
+                        sleep_cfg = str(self.api_sleep).replace(" ", "")  
+                        try:
+                            if "," in sleep_cfg:
+                                mn, mx = map(float, sleep_cfg.split(","))
+                                st = random.uniform(mn, mx)
+                            else:
+                                st = float(sleep_cfg)
+                        except: st = 10.0
+
+                    # если ключ всего один или удалили все ключи
+                    if len(self.api_keys) == 1 or len(self.api_keys) == 0:
+                        logger.warning(f"  ⚠️ Ключ #{current_idx + 1} исчерпан...")
+                    else:
+                        # 3. Логируем и спим    
+                        logger.warning(f"  ⚠️ Ключ #{current_idx + 1} исчерпан. Пауза {st:.1f}s перед сменой ключа...")
+                        time.sleep(st)
+                    
+                    # Если после удаления ключей не осталось — выходим
                     if not self.api_keys:
                         break
                     
-                    # Пауза перед использованием НОВОГО ключа (который встал на место старого)
-                    time.sleep(2) 
-                    continue # Идем на новый круг while, где возьмем новый self.api_keys[0]
+                    # Не увеличиваем call_count, так как массив сдвинулся сам
+                    # Не увеличиваем attempts, так как мы хотим попробовать тот же индекс, 
+                    # но уже с новым ключом, который встал на место удаленного
+                    continue
+                    
+                    self.call_count += 1 
+                    attempts += 1
+                    continue
 
-                # 2. Ошибка модели (404) - Фатально
+                # 2. Ошибка модели - выключаем модуль совсем
                 elif "404" in err_msg:
                     self.enabled = False 
                     logger.error(f"  ❌ [{self.name}] Неверная модель. ИИ отключен.")
-                    return issues
+                    return issues + [Issue(type="error", line=0, message="Неверная модель Gemini", source=self.name)]
 
-                # 3. Прочие ошибки (сеть и т.д.)
+                # 3. Все остальные ошибки (сеть, JSON и т.д.)
                 else:
-                    logger.error(f"  ❌ Ошибка Gemini: {e}")
-                    # При обычной ошибке сети можно попробовать еще раз или пропустить файл.
-                    # Чтобы не зациклиться, просто выходим возвращая пустой список для этого файла
-                    return issues
-        
-        
+                    logger.error(f"  ❌ Ошибка ключа #{current_idx + 1}: {e}")
+                    # Пробуем другой ключ при любой ошибке:
+                    self.call_count += 1
+                    attempts += 1
+                    continue
+                
         # Если цикл закончился, а мы ничего не вернули — значит все ключи сдохли
         logger.error(f"  💀 Все ключи исчерпаны. Отключаю модуль Gemini.")
         self.enabled = False # <--- ТЕПЕРЬ МОДЕЛЬ ВЫКЛЮЧИТСЯ СОВСЕМ
@@ -450,8 +487,6 @@ class GeminiValidator(BaseValidator):
             if not self.api_keys:
                 self.enabled = False
                 #logger.error("  💀 Все ключи Gemini удалены. Модуль отключен.")
-                
-        AppConsole.countdown(self.key_rotate, "Ротация ключа")
 
 class GrokDualValidator(BaseValidator):
     """
@@ -571,8 +606,7 @@ class AuditEngine:
             model=self.cfg['gemini_model'],
             max_chars=self.cfg['gemini_max_chars'],
             api_sleep=self.cfg['api_sleep'],
-            engine=self,
-            key_rotate=self.cfg['key_rotate'],
+            engine=self 
         ))
         # Grok Dual Validator
         self.validators.append(GrokDualValidator(
@@ -608,7 +642,6 @@ class AuditEngine:
             'grok_key': os.getenv("XAI_API_KEY"),
             'grok_model': os.getenv("GROK_MODEL", "grok-2-latest"),
             'grok_limit': int(os.getenv("GROK_MAX_CHARS", "45000")),
-            'key_rotate': int(os.getenv("KEY_ROTATE_INTERVAL", "300")),
         }
 
     def print_config(self):
@@ -621,7 +654,6 @@ class AuditEngine:
         print(f"🔑 Gemini Keys:   {self.cfg['gemini_keys_count']}")
         print(f"🧠 Grok Model:    {self.cfg['grok_model']}")
         print(f"⏱  Sleep:         {self.cfg['api_sleep']}s")
-        print(f"🌀 Key Rotate:    {self.cfg['key_rotate']}s")
         print(f"🔄 Resume Audit:  {'✅ Yes' if self.cfg['resume_audit'] else '⬜ No'}")
         print("-" * 100)
         print(f"🔌 Modules:")
@@ -1057,42 +1089,6 @@ class AuditEngine:
             f.write(html)
         
         print(f"\n✨ ОТЧЕТ СГЕНЕРИРОВАН: code_auditor_report.html")
-
-import time
-import sys
-
-# =================  AppConsole ==========================
-class AppConsole:
-    """Класс для управления выводом твоего скрипта"""
-    
-    @staticmethod
-    def countdown(seconds, msg="Ожидание"):
-        try:
-            for i in range(seconds, 0, -1):
-                # Печатаем с возвратом каретки (\r)
-                sys.stdout.write(f"\r   [ {msg}: {i}с ]   ")
-                sys.stdout.flush()
-                time.sleep(1)
-            # Стираем строку после окончания
-            sys.stdout.write("\r" + " " * 50 + "\r")
-            sys.stdout.flush()
-        except KeyboardInterrupt:
-            sys.stdout.write("\n   Прервано пользователем.\n")
-
-    @staticmethod
-    def info(text):
-        print(f"  ℹ️  {text}")
-
-    @staticmethod
-    def error(text):
-        print(f"  ❌  {text}")
-
-    @staticmethod
-    def success(text):
-        print(f"  ✅  {text}")
-
-# Пример вызова:
-# AppConsole.countdown(10, "Ротация ключа")
 
 if __name__ == "__main__":
     AuditEngine().run()
