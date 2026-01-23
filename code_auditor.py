@@ -316,6 +316,9 @@ class GeminiValidator(BaseValidator):
         return ext in ['.html', '.css', '.scss', '.sass', '.js', '.jsx', '.ts', '.tsx']
 
     def check(self, path: str, content: str, ext: str) -> List[Issue]:
+        if not self.enabled or not self.api_keys: 
+            return []
+    
         if not self.enabled or not self.can_check(ext):
             return []
 
@@ -360,9 +363,10 @@ class GeminiValidator(BaseValidator):
         current_key = self.api_keys[current_idx]
         
         attempts = 0
-        max_attempts = len(self.api_keys) # Пытаемся не больше раз, чем у нас есть ключей
         
-        while attempts < max_attempts:
+        while attempts < len(self.api_keys):
+            
+            # ВАЖНО: пересчитываем индекс внутри цикла, так как массив мог уменьшиться
             current_idx = self.call_count % len(self.api_keys)
             current_key = self.api_keys[current_idx]
             
@@ -414,6 +418,9 @@ class GeminiValidator(BaseValidator):
                 
                 # 1. Лимит ключа - пробуем следующий ключ
                 if "429" in err_msg or "quota" in err_msg:
+                    # Вместо простого пропуска — удаляем ключ совсем
+                    self.remove_key(current_key)
+                    
                     # 1. Сначала переходим на новую строку
                     print() 
                     
@@ -430,14 +437,22 @@ class GeminiValidator(BaseValidator):
                                 st = float(sleep_cfg)
                         except: st = 10.0
 
-                    # если ключ всего один 
-                    if len(self.api_keys) == 1:
+                    # если ключ всего один или удалили все ключи
+                    if len(self.api_keys) == 1 or len(self.api_keys) == 0:
                         logger.warning(f"  ⚠️ Ключ #{current_idx + 1} исчерпан...")
                     else:
                         # 3. Логируем и спим    
                         logger.warning(f"  ⚠️ Ключ #{current_idx + 1} исчерпан. Пауза {st:.1f}s перед сменой ключа...")
                         time.sleep(st)
                     
+                    # Если после удаления ключей не осталось — выходим
+                    if not self.api_keys:
+                        break
+                    
+                    # Не увеличиваем call_count, так как массив сдвинулся сам
+                    # Не увеличиваем attempts, так как мы хотим попробовать тот же индекс, 
+                    # но уже с новым ключом, который встал на место удаленного
+                    continue
                     
                     self.call_count += 1 
                     attempts += 1
@@ -462,6 +477,16 @@ class GeminiValidator(BaseValidator):
         self.enabled = False # <--- ТЕПЕРЬ МОДЕЛЬ ВЫКЛЮЧИТСЯ СОВСЕМ
         return issues + [Issue(type="error", line=0, message="Все ключи Gemini достигли лимита квоты. Модуль отключен.", source=self.name)]
                 
+    def remove_key(self, key_to_remove: str):
+        """Удаляет конкретный ключ из списка доступных."""
+        if key_to_remove in self.api_keys:
+            self.api_keys.remove(key_to_remove)
+            #logger.warning(f"  ⚠️ Ключ удален из пула. Осталось ключей: {len(self.api_keys)}")
+            
+            # Если ключей больше нет, отключаем модуль
+            if not self.api_keys:
+                self.enabled = False
+                #logger.error("  💀 Все ключи Gemini удалены. Модуль отключен.")
 
 class GrokDualValidator(BaseValidator):
     """
@@ -761,18 +786,29 @@ class AuditEngine:
                 for validator in self.validators:
                     # 2. Проверяем включен ли он (is_banned переключает enabled в False)
                     if validator.enabled and validator.can_check(ext):
+                        # 1. Сразу печатаем, что модуль начал работу
+                        print(f"[{validator.short_name}..", end="", flush=True)
+                        
                         try:
                             checked_by_modules.append(validator.short_name)
                             issues = validator.check(path, content, ext)
                             if issues:
                                 file_issues.extend(issues)
                             api_called = True
+                            # 2. Печатаем "ок", если всё прошло успешно
+                            print("ok] ", end="", flush=True)
                         except APIBannedException:
                             # Модуль только что себя отключил, переходим к следующему в этом файле
                             continue
                         except Exception as ve:
                             # print() # Принудительный переход на новую строку
-                            logger.error(f"\n   Error {validator.name}: {ve}")
+                            # old code logger.error(f"\n   Error {validator.name}: {ve}")
+                            
+                             # 3. Печатаем "err", если модуль упал (теперь ты увидишь это сразу)
+                            print("   err] ", end="", flush=True)
+                            # Добавляем переход на новую строку для логгера, чтобы не ломать вывод
+                            print() 
+                            logger.error(f"  ❌ Ошибка {validator.name}: {ve}")
                             
 
                 # Сохраняем отчет (Clean, Dirty или Not Checked)
