@@ -111,4 +111,11 @@ CHECK_SCRIPTS=True
 # --- СОСТОЯНИЕ ---
 RESUME_AUDIT=True
 TEMP_STATE_FILE=audit_state.temp.json
+
+# --- СОСТОЯНИЕ ---
+RESUME_AUDIT=True
+TEMP_STATE_FILE=audit_state.temp.json
+
+# --- РОТАЦИЯ КЛЮЧЕЙ (В СЕКУНДАХ) ---
+KEY_ROTATE_INTERVAL=600
 ```
