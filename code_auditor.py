@@ -27,6 +27,7 @@ CHANGELOG (New Design):
 GEMINI_API_KEY=0
 #GEMINI_MODEL=models/gemini-1.5-flash
 #GEMINI_MODEL=models/gemini-3-flash-preview
+#GEMINI_MODEL = "models/gemini-2.5-flash-lite"
 GEMINI_MODEL=models/gemini-2.5-flash
 
 # --- GROK API CONFIG ---
