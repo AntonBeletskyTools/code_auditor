@@ -18,53 +18,43 @@ CHANGELOG (New Design):
 - Статус "Not Checked" для файлов без активных валидаторов.
 - Визуальные бейджи активных инструментов для каждого файла.
 
-АВТОР: Gemini Pro (Enterprise Edition)
-==============================================================================
+АВТОР: Asguard
 # ==============================================================================
-# КОНФИГУРАЦИЯ
+# КОНФИГУРАЦИЯ CODE AUDITOR PRO
 # ==============================================================================
-# --- GEMINI API CONFIG ---
-GEMINI_API_KEY=0
-#GEMINI_MODEL=models/gemini-1.5-flash
-#GEMINI_MODEL=models/gemini-3-flash-preview
-#GEMINI_MODEL = "models/gemini-2.5-flash-lite"
-GEMINI_MODEL=models/gemini-2.5-flash
 
-# --- GROK API CONFIG ---
-XAI_API_KEY=0
+# --- GEMINI AI (Google) ---
+# Ключ переименован для соответствия новой логике gemini_key
+GEMINI_API_KEY=key
+GEMINI_MODEL=models/gemini-2.0-flash
+#GEMINI_MODEL = "models/gemini-2.5-flash-lite" #for many files
+GEMINI_MAX_CHARS=60000
+
+# --- GROK AI (xAI) ---
+XAI_API_KEY=key
 GROK_MODEL=grok-2-latest
+GROK_MAX_CHARS=60000
 
-GROK_MAX_CHARS=45000
+# --- ГЛОБАЛЬНЫЕ ВКЛЮЧАТЕЛИ ---
+ENABLE_W3C=False
+ENABLE_GEMINI=False
+ENABLE_GROK=False
 
-# --- PATHS ---
+# --- НАСТРОЙКИ СКОРОСТИ И ПАУЗ ---
+API_SLEEP=15,30
+
+# --- ПУТИ И ФИЛЬТРЫ ---
 SOURCE_DIR=src
-
-# --- GLOBAL TOGGLES ---
-#ENABLE_W3C=True
-#ENABLE_W3C=False
-#ENABLE_GEMINI=True
-#ENABLE_GEMINI=False
-ENABLE_GROK=True
-
-
-# --- CONTENT FILTERS ---
-# HTML файлы
 CHECK_HYPERTEXT=True
-# CSS, SCSS, SASS
 CHECK_STYLES=True
-# JS, JSX, TS, TSX
 CHECK_SCRIPTS=True
 
-# Задержка между файлами в секундах (чтобы не банил W3C)
-API_SLEEP=7,30
-
-# Максимальное количество символов кода для отправки в Gemini
-GEMINI_MAX_CHARS=45000
-# Продолжать ли аудит с места остановки (True/False)
+# --- СОСТОЯНИЕ ---
 RESUME_AUDIT=True
-# Имя файла для хранения промежуточного прогресса
 TEMP_STATE_FILE=audit_state.temp.json
-==============================================================================
+
+# --- РОТАЦИЯ КЛЮЧЕЙ (В СЕКУНДАХ) ---
+KEY_ROTATE_INTERVAL=600
 """
 
 import os
