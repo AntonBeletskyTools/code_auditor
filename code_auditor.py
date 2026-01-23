@@ -62,7 +62,8 @@ import json
 import time
 import re
 from wsgiref.validate import validator
-import requests
+#import requests
+from curl_cffi import requests
 import logging
 import random
 from abc import ABC, abstractmethod
@@ -160,41 +161,29 @@ class HeadersBuilder:
     ]
 
     @staticmethod
-    def build_headers(ext: Optional[str] = None, custom_ctype: Optional[str] = None) -> dict:
-        """
-        Основной метод генерации заголовка.
-        :param ext: Расширение файла (напр. '.html') для автоматического определения Content-Type.
-        :param custom_ctype: Можно передать тип вручную (напр. 'application/json').
-        :return: Словарь заголовков.
-        """
+    def build_headers(ext: Optional[str] = None, is_post: bool = False) -> dict:
+        ctype = "text/html" if ext == '.html' else "text/css" if ext == '.css' else "text/plain"
         
-        # 1. Определяем Content-Type
-        if custom_ctype:
-            ctype = custom_ctype
-        elif ext:
-            # Логика из вашего исходного кода
-            ctype = "text/html" if ext == '.html' else "text/css"
-        else:
-            ctype = "text/plain"
-
-        # 2. Собираем финальный словарь
-        # Используем random.choice для выбора случайного элемента из статических списков
         headers = {
-            'User-Agent': random.choice(HeadersBuilder.USER_AGENTS),
-            'Accept-Language': random.choice(HeadersBuilder.LANGUAGES),
-            'Accept': random.choice(HeadersBuilder.ACCEPT_TYPES),
-            'Content-Type': f"{ctype}; charset=utf-8",
+            'User-Agent': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+            'Accept': "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            'Accept-Language': "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
             'Sec-Fetch-Dest': 'document',
             'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'DNT': '1'  # Do Not Track - добавляет человечности
+            'Sec-Fetch-Site': 'cross-site' if is_post else 'none', # Для POST всегда cross-site
+            'Sec-CH-UA': '"Not(A:Brand";v="99", "Google Chrome";v="144", "Chromium";v="144"',
+            'Sec-CH-UA-Mobile': '?0',
+            'Sec-CH-UA-Platform': '"Windows"',
+            'DNT': '1'
         }
 
+        if is_post:
+            headers['Content-Type'] = f"{ctype}; charset=utf-8"
+            headers['Origin'] = "https://validator.w3.org" # С какого сайта якобы летит запрос
+            
         return headers
-
 # --- ПРИМЕР ИСПОЛЬЗОВАНИЯ В АУДИТОРЕ ---
 
 # Где-то в коде W3CValidator:
@@ -252,13 +241,25 @@ class W3CValidator(BaseValidator):
             }
         """
         
-        #create http header 
+        # 1. Генерируем заголовки
         builder = HeadersBuilder()
-        headers = builder.build_headers(ext='.html')
+        headers = builder.build_headers(ext='.html', is_post=True)
         
+        # 2. Создаем сессию с маскировкой (лучше вынести создание сессии в __init__ класса)
+        # Но если оставляем здесь:
+        session = requests.Session(impersonate="chrome124") 
+        session.headers.clear() 
 
         try:
-            resp = requests.post(self.API_URL, data=content.encode('utf-8'), headers=headers, timeout=15)
+            # 3. Делаем POST через сессию
+            resp = session.post(
+                self.API_URL, 
+                data=content.encode('utf-8'), 
+                headers=headers, 
+                timeout=15
+            )
+            
+            # 4. Получаем статус (raise_for_status убираем, как и договорились)
             status_code = resp.status_code
 
             if status_code == 200:
