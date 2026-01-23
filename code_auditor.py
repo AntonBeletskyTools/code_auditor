@@ -124,6 +124,85 @@ class APIBannedException(Exception):
     """Специальное исключение для сигнализации о блокировке API (429/Quota)"""
     pass
 
+import random
+from typing import Optional
+
+# =================   Headers Builder  =================
+
+class HeadersBuilder:
+    """
+    Класс для генерации реалистичных HTTP-заголовков.
+    Использует статические массивы данных для маскировки под реального пользователя.
+    """
+
+    # --- СТАТИЧЕСКИЕ ДАННЫЕ (База знаний билдера) ---
+    
+    # Популярные User-Agents (Windows, macOS, Linux - Chrome, Firefox, Safari)
+    USER_AGENTS = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15"
+    ]
+
+    # Варианты языковых настроек
+    LANGUAGES = [
+        "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "en-US,en;q=0.9",
+        "ru-RU,ru;q=0.9",
+        "en-GB,en;q=0.8,ru;q=0.6"
+    ]
+
+    # Варианты Accept (браузеры запрашивают разное, имитируем это)
+    ACCEPT_TYPES = [
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "application/json, text/plain, */*",
+        "*/*"
+    ]
+
+    @staticmethod
+    def build_headers(ext: Optional[str] = None, custom_ctype: Optional[str] = None) -> dict:
+        """
+        Основной метод генерации заголовка.
+        :param ext: Расширение файла (напр. '.html') для автоматического определения Content-Type.
+        :param custom_ctype: Можно передать тип вручную (напр. 'application/json').
+        :return: Словарь заголовков.
+        """
+        
+        # 1. Определяем Content-Type
+        if custom_ctype:
+            ctype = custom_ctype
+        elif ext:
+            # Логика из вашего исходного кода
+            ctype = "text/html" if ext == '.html' else "text/css"
+        else:
+            ctype = "text/plain"
+
+        # 2. Собираем финальный словарь
+        # Используем random.choice для выбора случайного элемента из статических списков
+        headers = {
+            'User-Agent': random.choice(HeadersBuilder.USER_AGENTS),
+            'Accept-Language': random.choice(HeadersBuilder.LANGUAGES),
+            'Accept': random.choice(HeadersBuilder.ACCEPT_TYPES),
+            'Content-Type': f"{ctype}; charset=utf-8",
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'DNT': '1'  # Do Not Track - добавляет человечности
+        }
+
+        return headers
+
+# --- ПРИМЕР ИСПОЛЬЗОВАНИЯ В АУДИТОРЕ ---
+
+# Где-то в коде W3CValidator:
+# builder = HeadersBuilder()
+# current_headers = builder.build_headers(ext='.html')
+
 # =================  ABSTRACT VALIDATOR =================
 
 class BaseValidator(ABC):
@@ -164,6 +243,7 @@ class W3CValidator(BaseValidator):
         if not self.enabled or not self.can_check(ext):
             return []
 
+        """ old header way 
         ctype = "text/html" if ext == '.html' else "text/css"
         
         headers = {
@@ -172,6 +252,12 @@ class W3CValidator(BaseValidator):
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
                 'Content-Type': f'{ctype}; charset=utf-8'
             }
+        """
+        
+        #create http header 
+        builder = HeadersBuilder()
+        headers = builder.build_headers(ext='.html')
+        
 
         try:
             resp = requests.post(self.API_URL, data=content.encode('utf-8'), headers=headers, timeout=15)
