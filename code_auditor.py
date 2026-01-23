@@ -612,7 +612,7 @@ class AuditEngine:
         }
 
     def print_config(self):
-        print("\n" + "="*100)
+        print("="*100)
         print("🛠  CODE AUDITOR: CONFIGURATION")
         print("="*100)
         print(f"📂 Source:        {self.cfg['src']}")
@@ -692,7 +692,7 @@ class AuditEngine:
             logger.error(f"\n   State save error: {e}")
 
     def run(self):
-        print(f"🚀 ЗАПУСК CODE AUDITOR PRO...")
+        print(f"\n💾 ЗАПУСК CODE AUDITOR PRO...")
         self.print_config()
         
         all_files = self.scan()
