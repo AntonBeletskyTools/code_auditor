@@ -1,0 +1,95 @@
+[
+  {
+    "path": "src\\404.html",
+    "timestamp": "16:27",
+    "issues": [
+      {
+        "type": "warning",
+        "line": 6,
+        "message": "[Standard] The document is not mappable to XML 1.0 due to two consecutive hyphens in a comment.",
+        "source": "W3C Validator",
+        "suggestion": null
+      },
+      {
+        "type": "warning",
+        "line": 8,
+        "message": "[Standard] Trailing slash on void elements has no effect and interacts badly with unquoted attribute values.",
+        "source": "W3C Validator",
+        "suggestion": null
+      },
+      {
+        "type": "warning",
+        "line": 21,
+        "message": "[Standard] Trailing slash on void elements has no effect and interacts badly with unquoted attribute values.",
+        "source": "W3C Validator",
+        "suggestion": null
+      },
+      {
+        "type": "warning",
+        "line": 28,
+        "message": "[Standard] Trailing slash on void elements has no effect and interacts badly with unquoted attribute values.",
+        "source": "W3C Validator",
+        "suggestion": null
+      },
+      {
+        "type": "error",
+        "line": 146,
+        "message": "[Standard] The “aria-labelledby” attribute must not be specified on any “div” element unless the element has a “role” value other than “caption”, “code”, “deletion”, “emphasis”, “generic”, “insertion”, “paragraph”, “presentation”, “strong”, “subscript”, or “superscript”.",
+        "source": "W3C Validator",
+        "suggestion": null
+      },
+      {
+        "type": "error",
+        "line": 539,
+        "message": "[Standard] The “aria-labelledby” attribute must not be specified on any “div” element unless the element has a “role” value other than “caption”, “code”, “deletion”, “emphasis”, “generic”, “insertion”, “paragraph”, “presentation”, “strong”, “subscript”, or “superscript”.",
+        "source": "W3C Validator",
+        "suggestion": null
+      },
+      {
+        "type": "error",
+        "line": 610,
+        "message": "[Standard] The “aria-labelledby” attribute must not be specified on any “div” element unless the element has a “role” value other than “caption”, “code”, “deletion”, “emphasis”, “generic”, “insertion”, “paragraph”, “presentation”, “strong”, “subscript”, or “superscript”.",
+        "source": "W3C Validator",
+        "suggestion": null
+      },
+      {
+        "type": "error",
+        "line": 643,
+        "message": "[Standard] Element “style” not allowed as child of element “main” in this context. (Suppressing further errors from this subtree.)",
+        "source": "W3C Validator",
+        "suggestion": null
+      },
+      {
+        "type": "error",
+        "line": 658,
+        "message": "[Standard] The “main” element must not appear as a descendant of the “main” element.",
+        "source": "W3C Validator",
+        "suggestion": null
+      },
+      {
+        "type": "error",
+        "line": 658,
+        "message": "[Standard] A document must not include more than one visible “main” element.",
+        "source": "W3C Validator",
+        "suggestion": null
+      },
+      {
+        "type": "error",
+        "line": 540,
+        "message": "[Standard] The heading “h6” (with computed level 6) follows the heading “h2” (with computed level 2), skipping 3 heading levels.",
+        "source": "W3C Validator",
+        "suggestion": null
+      },
+      {
+        "type": "error",
+        "line": 695,
+        "message": "[Standard] The heading “h5” (with computed level 5) follows the heading “h2” (with computed level 2), skipping 2 heading levels.",
+        "source": "W3C Validator",
+        "suggestion": null
+      }
+    ],
+    "checked_by": [
+      "W3C"
+    ]
+  }
+]

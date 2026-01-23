@@ -56,7 +56,7 @@ CHECK_STYLES=True
 CHECK_SCRIPTS=True
 
 # Задержка между файлами в секундах (чтобы не банил W3C)
-API_SLEEP=15_30
+API_SLEEP=7,30
 
 # Максимальное количество символов кода для отправки в Gemini
 GEMINI_MAX_CHARS=45000
@@ -702,14 +702,19 @@ class AuditEngine:
                     print(f" ⚠️ {len(file_issues)} issues")
 
                 if api_called:
-                    sleep_cfg = str(self.cfg['api_sleep'])
-                    if "_" in sleep_cfg:
+                    sleep_cfg = str(self.cfg['api_sleep']).replace(" ", "") # Убираем пробелы
+                    if "," in sleep_cfg: # Проверяем наличие запятой
                         try:
-                            mn, mx = map(float, sleep_cfg.split("_"))
+                            # Разбиваем по запятой и преобразуем обе части в float
+                            mn, mx = map(float, sleep_cfg.split(","))
                             st = random.uniform(mn, mx)
-                        except: st = 10.0
+                        except Exception: 
+                            st = 10.0 # Фоллбэк при ошибке парсинга
                     else:
-                        st = float(sleep_cfg)
+                        try:
+                            st = float(sleep_cfg)
+                        except:
+                            st = 10.0
                     time.sleep(st)
 
             except Exception as e:
