@@ -297,7 +297,7 @@ class GeminiValidator(BaseValidator):
         self.engine = engine  # Ссылка на движок для логов
         self.api_sleep = api_sleep  # Пауза между вызовами
         self.max_attempts = len(api_keys) if api_keys else 0 # Максимум попыток равен числу ключей
-        self.key_rotate = key_rotate
+        self.key_rotate = key_rotate # Интервал ротации ключей в секундах
         
         if self.enabled and not self.api_keys:
             logger.warning(f"\n   Gemini API Keys are missing. AI disabled.")
@@ -401,8 +401,8 @@ class GeminiValidator(BaseValidator):
                 
                 # 1. Лимит ключа (429/Quota) - УДАЛЯЕМ ТЕКУЩИЙ КЛЮЧ
                 if "429" in err_msg or "quota" in err_msg:
+                    self.remove_key(current_key, self.max_attempts) # Удаляем [0], список сдвигается
                     logger.warning(f"  ⚠️ Ключ ...{current_key[-4:]} исчерпан. Удаляю и беру следующий.")
-                    self.remove_key(current_key) # Удаляем [0], список сдвигается
                     
                     # Если ключей не осталось — прерываем цикл
                     if not self.api_keys:
@@ -431,7 +431,7 @@ class GeminiValidator(BaseValidator):
         self.enabled = False # <--- ТЕПЕРЬ МОДЕЛЬ ВЫКЛЮЧИТСЯ СОВСЕМ
         return issues + [Issue(type="error", line=0, message="Все ключи Gemini достигли лимита квоты. Модуль отключен.", source=self.name)]
                 
-    def remove_key(self, key_to_remove: str):
+    def remove_key(self, key_to_remove: str, max_attempts: int):
         """Удаляет конкретный ключ из списка доступных."""
         if key_to_remove in self.api_keys:
             self.api_keys.remove(key_to_remove)
@@ -440,7 +440,15 @@ class GeminiValidator(BaseValidator):
             # Если ключей больше нет, отключаем модуль
             if not self.api_keys:
                 self.enabled = False
+                return
                 #logger.error("  💀 Все ключи Gemini удалены. Модуль отключен.")
+            
+            # Если достигнуто максимальное число попыток, отключаем модуль
+            if max_attempts == 1 or max_attempts == 0:
+                self.enabled = False
+                return
+                #logger.error("  💀 Максимальное число попыток исчерпано. Модуль отключен.")
+                
                 
         AppConsole.countdown(self.key_rotate, "Ротация ключа")
 
