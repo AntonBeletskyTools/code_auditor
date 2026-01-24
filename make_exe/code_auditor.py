@@ -1,0 +1,1100 @@
+"""
+==============================================================================
+CODE AUDITOR PRO
+Enterprise-grade Code Audit System
+
+ФУНКЦИОНАЛ:
+1. Изоляция ошибок: Сбой модуля не ломает процесс.
+2. Матрица ответственности:
+   - HTML/CSS -> W3C Validator + Gemini AI
+   - SCSS/SASS -> Gemini AI
+   - JS/TS/React -> Gemini AI
+3. State Persistence: Атомарное сохранение и Resume.
+4. Transparency: Четкое разделение Clean / Dirty / Not Checked.
+
+CHANGELOG (New Design):
+- Добавлено отслеживание покрытия (Coverage Tracking).
+- Новый "Корпоративный" HTML отчет.
+- Статус "Not Checked" для файлов без активных валидаторов.
+- Визуальные бейджи активных инструментов для каждого файла.
+
+АВТОР: Asguard
+# ==============================================================================
+# КОНФИГУРАЦИЯ CODE AUDITOR PRO
+# ==============================================================================
+
+# --- GEMINI AI (Google) ---
+# Ключ переименован для соответствия новой логике gemini_key
+GEMINI_API_KEY=key
+GEMINI_MODEL=models/gemini-2.0-flash
+#GEMINI_MODEL = "models/gemini-2.5-flash-lite" #for many files
+GEMINI_MAX_CHARS=60000
+
+# --- GROK AI (xAI) ---
+XAI_API_KEY=key
+GROK_MODEL=grok-2-latest
+GROK_MAX_CHARS=60000
+
+# --- ГЛОБАЛЬНЫЕ ВКЛЮЧАТЕЛИ ---
+ENABLE_W3C=False
+ENABLE_GEMINI=False
+ENABLE_GROK=False
+
+# --- НАСТРОЙКИ СКОРОСТИ И ПАУЗ ---
+API_SLEEP=15,30
+
+# --- ПУТИ И ФИЛЬТРЫ ---
+SOURCE_DIR=src
+CHECK_HYPERTEXT=True
+CHECK_STYLES=True
+CHECK_SCRIPTS=True
+
+# --- СОСТОЯНИЕ ---
+RESUME_AUDIT=True
+TEMP_STATE_FILE=audit_state.temp.json
+
+# --- РОТАЦИЯ КЛЮЧЕЙ (В СЕКУНДАХ) ---
+KEY_ROTATE_INTERVAL=600
+"""
+
+import os
+import json
+import time
+import re
+from wsgiref.validate import validator
+#import requests
+from curl_cffi import requests
+import logging
+import random
+from abc import ABC, abstractmethod
+from datetime import datetime
+from dataclasses import dataclass, asdict, field
+from typing import List, Optional
+
+
+
+# --- Инициализация окружения ---
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    print("❌ CRITICAL: pip install google-genai requests python-dotenv")
+    exit(1)
+
+# Логирование
+#logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s', datefmt='%H:%M:%S')
+# Добавляем -8 к levelname, чтобы зарезервировать 8 символов под имя уровня (Error/Warning/Info)
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s | %(levelname)-8s | %(message)s', 
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger("CodeAuditor")
+
+
+# =================  DATA MODELS (OOP) =================
+
+@dataclass
+class Issue:
+    """Единица найденной проблемы"""
+    type: str       # error, warning, suggestion
+    line: int
+    message: str
+    source: str     # Имя валидатора
+    suggestion: Optional[str] = None
+
+@dataclass
+class FileReport:
+    """Результат проверки одного файла"""
+    path: str
+    timestamp: str
+    issues: List[Issue] = field(default_factory=list)
+    # НОВОЕ: Список валидаторов, которые реально проверяли этот файл
+    checked_by: List[str] = field(default_factory=list) 
+
+# =================   Exception Class   =================
+
+class APIBannedException(Exception):
+    """Специальное исключение для сигнализации о блокировке API (429/Quota)"""
+    pass
+
+
+
+# =================   Headers Builder  =================
+
+class HeadersBuilder:
+    """
+    Класс для генерации реалистичных HTTP-заголовков.
+    Использует статические массивы данных для маскировки под реального пользователя.
+    """
+
+    # --- СТАТИЧЕСКИЕ ДАННЫЕ (База знаний билдера) ---
+    
+    # Популярные User-Agents (Windows, macOS, Linux - Chrome, Firefox, Safari)
+    USER_AGENTS = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15"
+    ]
+
+    # Варианты языковых настроек
+    LANGUAGES = [
+        "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "en-US,en;q=0.9",
+        "ru-RU,ru;q=0.9",
+        "en-GB,en;q=0.8,ru;q=0.6"
+    ]
+
+    # Варианты Accept (браузеры запрашивают разное, имитируем это)
+    ACCEPT_TYPES = [
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "application/json, text/plain, */*",
+        "*/*"
+    ]
+
+    @staticmethod
+    def build_headers(ext: Optional[str] = None, is_post: bool = False) -> dict:
+        ctype = "text/html" if ext == '.html' else "text/css" if ext == '.css' else "text/plain"
+        
+        headers = {
+            'User-Agent': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+            'Accept': "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            'Accept-Language': "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'cross-site' if is_post else 'none', # Для POST всегда cross-site
+            'Sec-CH-UA': '"Not(A:Brand";v="99", "Google Chrome";v="144", "Chromium";v="144"',
+            'Sec-CH-UA-Mobile': '?0',
+            'Sec-CH-UA-Platform': '"Windows"',
+            'DNT': '1'
+        }
+
+        if is_post:
+            headers['Content-Type'] = f"{ctype}; charset=utf-8"
+            headers['Origin'] = "https://validator.w3.org" # С какого сайта якобы летит запрос
+            
+        return headers
+# --- ПРИМЕР ИСПОЛЬЗОВАНИЯ В АУДИТОРЕ ---
+
+# Где-то в коде W3CValidator:
+# builder = HeadersBuilder()
+# current_headers = builder.build_headers(ext='.html')
+
+# =================  ABSTRACT VALIDATOR =================
+
+class BaseValidator(ABC):
+    """Базовый класс для всех проверочных модулей"""
+    def __init__(self, name: str, short_name: str, enabled: bool, **kwargs):
+        self.name = name
+        self.short_name = short_name # Короткое имя для бейджиков (напр. "AI", "W3C")
+        self.enabled = enabled
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+    @abstractmethod
+    def check(self, path: str, content: str, ext: str) -> List[Issue]:
+        """Запуск проверки"""
+        pass
+
+    @abstractmethod
+    def can_check(self, ext: str) -> bool:
+        """Проверка применимости валидатора к расширению файла"""
+        pass
+
+# =================  CONCRETE VALIDATORS =================
+
+class W3CValidator(BaseValidator):
+    """Модуль строгой проверки стандартов (HTML/CSS)"""
+    
+    API_URL = "https://validator.w3.org/nu/?out=json"
+    
+    def __init__(self, enabled: bool):
+        super().__init__(name="W3C Validator", short_name="W3C", enabled=enabled)
+        self.url = "https://validator.w3.org/nu/?out=json"
+        self.disabled = False  # Флаг для мягкого отключения при 429 ошибке
+
+    def can_check(self, ext: str) -> bool:
+        return ext in ['.html', '.css']
+
+    def check(self, path: str, content: str, ext: str) -> List[Issue]:
+        if not self.enabled or not self.can_check(ext):
+            return []
+
+        """ old header way 
+        ctype = "text/html" if ext == '.html' else "text/css"
+        
+        headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Content-Type': f'{ctype}; charset=utf-8'
+            }
+        """
+        
+        # 1. Генерируем заголовки
+        builder = HeadersBuilder()
+        headers = builder.build_headers(ext='.html', is_post=True)
+        
+        # 2. Создаем сессию с маскировкой (лучше вынести создание сессии в __init__ класса)
+        # Но если оставляем здесь:
+        session = requests.Session(impersonate="chrome124") 
+        session.headers.clear() 
+
+        try:
+            # 3. Делаем POST через сессию
+            resp = session.post(
+                self.API_URL, 
+                data=content.encode('utf-8'), 
+                headers=headers, 
+                timeout=15
+            )
+            
+            # 4. Получаем статус (raise_for_status убираем, как и договорились)
+            status_code = resp.status_code
+
+            if status_code == 200:
+                messages = resp.json().get('messages', [])
+                return [Issue(
+                    type="error" if m.get('type') == 'error' else "warning",
+                    line=m.get('lastLine', m.get('firstLine', 0)),
+                    message=f"[Standard] {m.get('message')}",
+                    source=self.name
+                ) for m in messages]
+
+            elif status_code == 429:
+                self.enabled = False # Мягкое отключение внутри объекта
+                logger.error(f"\n   [{self.name}] 429: Too Many Requests!")
+                return [Issue(type="error", line=0, message="🚫 W3C API Rate Limit (429)", source=self.name)]
+            elif status_code == 404:
+                return [Issue(type="warning", line=0, message="⚠️ W3C API Unavailable (404)", source=self.name)]
+            else:
+                return [Issue(type="error", line=0, message=f"W3C API Error: {status_code}", source=self.name)]
+
+        except Exception as e:
+            logger.error(f"\n   [{self.name}] Connection Error: {e}")
+            return [Issue(type="warning", line=0, message=f"W3C Connection Failed", source=self.name)]
+
+class GeminiValidator(BaseValidator):
+    """Модуль интеллектуального анализа (AI)"""
+
+        
+    def __init__(self, enabled: bool, api_keys: list, model: str, max_chars: int = 30000, api_sleep=10.0,engine=None, key_rotate=300):
+        super().__init__(name="Gemini AI", short_name="AI", enabled=enabled)
+        self.model = model
+        self.max_chars = max_chars
+        self.api_keys = api_keys # Список всех ключей
+        self.call_count = 0      # Счетчик вызовов
+        self.engine = engine  # Ссылка на движок для логов
+        self.api_sleep = api_sleep  # Пауза между вызовами
+        self.max_attempts = len(api_keys) if api_keys else 0 # Максимум попыток равен числу ключей
+        self.key_rotate = key_rotate # Интервал ротации ключей в секундах
+        
+        if self.enabled and not self.api_keys:
+            logger.warning(f"\n   Gemini API Keys are missing. AI disabled.")
+            self.enabled = False
+        
+    def can_check(self, ext: str) -> bool:
+        # AI может проверять почти всё, что текстовое
+        return ext in ['.html', '.css', '.scss', '.sass', '.js', '.jsx', '.ts', '.tsx']
+
+    def check(self, path: str, content: str, ext: str) -> List[Issue]:
+        if not self.enabled or not self.api_keys: 
+            return []
+    
+        if not self.enabled or not self.can_check(ext):
+            return []
+
+        issues = []
+        if len(content) > self.max_chars:
+            msg = f"File truncated ({len(content)} > {self.max_chars} chars)."
+            issues.append(Issue(type="warning", line=0, message=f"⚠️ {msg}", source=self.name))
+        
+        context = "code"
+        if ext in ['.css', '.scss', '.sass']: context = "styles (SCSS/CSS)"
+        elif ext in ['.js', '.jsx', '.ts', '.tsx']: context = "logic & security (JS/React)"
+        elif ext == '.html': context = "HTML structure & semantics"
+
+        prompt = f"""
+        Role: Senior Code Reviewer. Task: Audit file {path}.
+        Context: Analyzing {context}.
+        
+        Rules:
+        1. Find logical bugs, security risks (XSS), memory leaks.
+        2. Check for DRY, clean code, naming conventions.
+        3. Be concise. High signal-to-noise ratio.
+        
+        Response JSON format:
+        {{
+            "issues": [
+                {{
+                    "type": "error"|"warning"|"suggestion",
+                    "line": <int>,
+                    "message": "<text_ru>",
+                    "suggestion": "<fix_code_snippet_if_needed>"
+                }}
+            ]
+        }}
+        
+        CODE:
+        {content[:self.max_chars]}
+        """
+
+        # новый цикл который юзает ключ пока тот не упадет
+        # --- НОВАЯ ЛОГИКА: ЛИНЕЙНАЯ ОЧЕРЕДЬ (БЕЗ КАРУСЕЛИ) ---
+        # Мы не вычисляем индекс. Мы всегда берем ПЕРВЫЙ доступный ключ [0].
+        # Если он рабочий — используем его вечно.
+        # Если он падает с ошибкой 429 — удаляем его, и следующий становится первым.
+        
+        while self.api_keys: # Пока в списке есть хоть один ключ
+            
+            current_key = self.api_keys[0] # Всегда берем верхний ключ
+            
+            try:
+                # Создаем клиента именно под выбранный ключ
+                temp_client = genai.Client(api_key=current_key)
+
+                response = temp_client.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )          
+
+                # УСПЕХ: 
+                self.call_count += 1 # Просто считаем статистику
+
+                text_resp = response.text
+                # ... (Далее идет стандартная обработка JSON, оставляем как есть) ...
+                # Ищем фигурные скобки...
+                json_match = re.search(r'\{.*\}', text_resp, re.DOTALL) 
+                if json_match:
+                    clean_json = json_match.group(0)
+                else:
+                    clean_json = re.sub(r"^```json\s*|\s*```$", "", text_resp, flags=re.MULTILINE).strip()
+
+                try:
+                    data = json.loads(clean_json)
+                except json.JSONDecodeError:
+                    data = {}
+                
+                ai_list = [Issue(
+                    type=i.get('type', 'warning'),
+                    line=i.get('line', 0),
+                    message=i.get('message', 'Issue detected'),
+                    source=self.name,
+                    suggestion=i.get('suggestion')
+                ) for i in data.get('issues', [])]
+                
+                return issues + ai_list # <--- ВЫХОД ИЗ ФУНКЦИИ ПРИ УСПЕХЕ
+                    
+            except Exception as e:
+                err_msg = str(e).lower()
+                
+                # 1. Лимит ключа (429/Quota) - УДАЛЯЕМ ТЕКУЩИЙ КЛЮЧ
+                if "429" in err_msg or "quota" in err_msg:
+                    self.remove_key(current_key, self.max_attempts) # Удаляем [0], список сдвигается
+                    logger.warning(f"  ⚠️ Ключ ...{current_key[-4:]} исчерпан. Удаляю и беру следующий.")
+                    
+                    # Если ключей не осталось — прерываем цикл
+                    if not self.api_keys:
+                        break
+                    
+                    # Пауза перед использованием НОВОГО ключа (который встал на место старого)
+                    time.sleep(2) 
+                    continue # Идем на новый круг while, где возьмем новый self.api_keys[0]
+
+                # 2. Ошибка модели (404) - Фатально
+                elif "404" in err_msg:
+                    self.enabled = False 
+                    logger.error(f"  ❌ [{self.name}] Неверная модель. ИИ отключен.")
+                    return issues
+
+                # 3. Прочие ошибки (сеть и т.д.)
+                else:
+                    logger.error(f"  ❌ Ошибка Gemini: {e}")
+                    # При обычной ошибке сети можно попробовать еще раз или пропустить файл.
+                    # Чтобы не зациклиться, просто выходим возвращая пустой список для этого файла
+                    return issues
+        
+        
+        # Если цикл закончился, а мы ничего не вернули — значит все ключи сдохли
+        logger.error(f"  💀 Все ключи исчерпаны. Отключаю модуль Gemini.")
+        self.enabled = False # <--- ТЕПЕРЬ МОДЕЛЬ ВЫКЛЮЧИТСЯ СОВСЕМ
+        return issues + [Issue(type="error", line=0, message="Все ключи Gemini достигли лимита квоты. Модуль отключен.", source=self.name)]
+                
+    def remove_key(self, key_to_remove: str, max_attempts: int):
+        """Удаляет конкретный ключ из списка доступных."""
+        if key_to_remove in self.api_keys:
+            self.api_keys.remove(key_to_remove)
+            #logger.warning(f"  ⚠️ Ключ удален из пула. Осталось ключей: {len(self.api_keys)}")
+            
+            # Если ключей больше нет, отключаем модуль
+            if not self.api_keys:
+                self.enabled = False
+                return
+                #logger.error("  💀 Все ключи Gemini удалены. Модуль отключен.")
+            
+            # Если достигнуто максимальное число попыток, отключаем модуль
+            if max_attempts == 1 or max_attempts == 0:
+                self.enabled = False
+                return
+                #logger.error("  💀 Максимальное число попыток исчерпано. Модуль отключен.")
+                
+                
+        AppConsole.countdown(self.key_rotate, "Ротация ключа")
+
+class GrokDualValidator(BaseValidator):
+    """
+    Модуль xAI Grok (Dual Mode).
+    Выполняет роль и валидатора стандартов (как W3C), и логического анализатора.
+    """
+    def __init__(self, enabled: bool, api_key: str, model: str, max_chars: int):
+        super().__init__(name="Grok Dual", short_name="GROK", enabled=enabled)
+        self.model = model
+        self.api_key = api_key
+        self.max_chars = max_chars
+        self.base_url = "https://api.x.ai/v1/chat/completions"
+
+    def can_check(self, ext: str) -> bool:
+        # Grok проверяет и фронтенд, и бэкенд
+        return ext in ['.html', '.css', '.scss', '.js', '.jsx', '.ts', '.tsx', '.py', '.php']
+
+    def check(self, path: str, content: str, ext: str) -> List[Issue]:
+        if not self.enabled or not self.api_key: return []
+
+        # Настройка роли в зависимости от типа файла
+        if ext in ['.html', '.css', '.scss']:
+            role_desc = "Strict W3C Standards Emulator & Frontend Architect"
+        else:
+            role_desc = "Senior Security Engineer & Polyglot Programmer"
+
+        prompt = f"""
+        IMPORTANT: Be an aggressive reviewer. Even if the code works, look for:
+        - Performance bottlenecks.
+        - Potential security vulnerabilities.
+        - Code style inconsistencies.
+        If the code is perfect, explain WHY in a suggestion, but try to find at least one improvement.
+        
+        Role: {role_desc}.
+        Task: Perform a DUAL-LAYER AUDIT for file: {path}.
+        
+        LAYER 1: STANDARDS & SYNTAX
+        - Act as a strict validator (like W3C or ESLint). Report syntax errors, deprecated tags.
+        
+        LAYER 2: LOGIC & INTELLIGENCE
+        - Analyze logic flows, security risks, complexity.
+
+        Return a single JSON object with a list of issues.
+        JSON Schema:
+        {{ "issues": [ {{ "type": "error"|"warning"|"suggestion", "line": <int>, "message": "[Standards]... OR [Logic]... (in Russian)", "suggestion": "fix" }} ] }}
+
+        CODE CONTENT:
+        {content[:self.max_chars]}
+        """
+        
+
+        headers = { "Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json" }
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": "You are an automated code auditor. Output strict JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.2
+        }
+
+        try:
+            resp = requests.post(self.base_url, json=payload, headers=headers, timeout=40)
+            status_code = resp.status_code
+
+            if status_code == 200:
+                data = resp.json()
+                raw_content = data['choices'][0]['message']['content']
+                parsed = json.loads(raw_content)
+                return [Issue(
+                    type=i.get('type', 'warning'),
+                    line=i.get('line', 0),
+                    message=i.get('message'),
+                    source=self.name,
+                    suggestion=i.get('suggestion')
+                ) for i in parsed.get('issues', [])]
+
+            elif status_code == 403:
+                # Обработка ошибки доступа (как у тебя с балансом)
+                self.enabled = False
+                logger.error(f"\n   🚫 [{self.name}] Ошибка доступа (403): Проверьте баланс или токены.")
+                return [Issue(type="error", line=0, message="🚫 Grok API No Permission / No Credits", source=self.name)]
+
+            elif status_code == 429:
+                self.enabled = False
+                logger.error(f"\n   🛑 [{self.name}] Лимит запросов (429). Модуль отключен.")
+                raise APIBannedException("Grok Rate Limit")
+
+            else:
+                logger.error(f"\n   ❌ [{self.name}] API Error: {status_code}")
+                return [Issue(type="error", line=0, message=f"Grok API Error: {status_code}", source=self.name)]
+
+        except Exception as e:
+            logger.error(f"\n   [{self.name}] Connection/Parse Error: {e}")
+            return [Issue(type="warning", line=0, message=f"Grok Failed: {str(e)[:50]}", source=self.name)]
+        
+# =================  ENGINE (ORCHESTRATOR) =================
+
+class AuditEngine:
+    """Главный класс-оркестратор"""
+    
+    def __init__(self):
+        self.load_config()
+        self.temp_file = self.cfg['temp_file']
+        self.validators: List[BaseValidator] = []
+        self.reports: List[FileReport] = []
+        
+        # Регистрация плагинов
+        
+        # W3C Validator
+        self.validators.append(W3CValidator(enabled=self.cfg['w3c_on']))
+        # Gemini AI Validator
+        self.validators.append(GeminiValidator(
+            enabled=self.cfg['gemini_on'], 
+            api_keys=self.cfg['gemini_keys'], # Передаем весь список ключей
+            model=self.cfg['gemini_model'],
+            max_chars=self.cfg['gemini_max_chars'],
+            api_sleep=self.cfg['api_sleep'],
+            engine=self,
+            key_rotate=self.cfg['key_rotate'],
+        ))
+        # Grok Dual Validator
+        self.validators.append(GrokDualValidator(
+            enabled=self.cfg['grok_enabled'],
+            api_key=self.cfg['grok_key'],
+            model=self.cfg['grok_model'],
+            max_chars=self.cfg['grok_limit']
+        ))
+
+    def load_config(self):
+        def get_bool(k, d="True"): return os.getenv(k, d).lower() in ("true", "1", "yes", "on")
+        
+        # берем массив ключей вместо ключа 
+        raw_keys = os.getenv("GEMINI_API_KEY", "0")
+        gemini_keys_list = [k.strip() for k in raw_keys.split(",") if k.strip()]
+        gemini_keys_count = len(gemini_keys_list)
+        
+        self.cfg = {
+            'src': os.getenv("SOURCE_DIR", "src"),
+            'gemini_keys': gemini_keys_list,
+            'gemini_keys_count': gemini_keys_count,
+            'gemini_model': os.getenv("GEMINI_MODEL", "models/gemini-2.0-flash"),
+            'w3c_on': get_bool("ENABLE_W3C"),
+            'gemini_on': get_bool("ENABLE_GEMINI"),
+            'filter_html': get_bool("CHECK_HYPERTEXT"),
+            'filter_css': get_bool("CHECK_STYLES"),
+            'filter_js': get_bool("CHECK_SCRIPTS"),
+            'api_sleep': os.getenv("API_SLEEP", "10.0"),
+            'gemini_max_chars': int(os.getenv("GEMINI_MAX_CHARS", "30000")),
+            'resume_audit': get_bool("RESUME_AUDIT", "True"),
+            'temp_file': os.getenv("TEMP_STATE_FILE", "audit_state.temp.json"),
+            'grok_enabled': get_bool("ENABLE_GROK"),
+            'grok_key': os.getenv("XAI_API_KEY"),
+            'grok_model': os.getenv("GROK_MODEL", "grok-2-latest"),
+            'grok_limit': int(os.getenv("GROK_MAX_CHARS", "45000")),
+            'key_rotate': int(os.getenv("KEY_ROTATE_INTERVAL", "300")),
+        }
+
+    def print_config(self):
+        print("="*100)
+        print("🛠  CODE AUDITOR: CONFIGURATION")
+        print("="*100)
+        print(f"📂 Source:        {self.cfg['src']}")
+        print(f"🌐 W3 Validator:  {self.cfg['w3c_on']}")
+        print(f"🤖 Gemini Model:  {self.cfg['gemini_model']}")
+        print(f"🔑 Gemini Keys:   {self.cfg['gemini_keys_count']}")
+        print(f"🧠 Grok Model:    {self.cfg['grok_model']}")
+        print(f"⏱  Sleep:         {self.cfg['api_sleep']}s")
+        print(f"🌀 Key Rotate:    {self.cfg['key_rotate']}s")
+        print(f"🔄 Resume Audit:  {'✅ Yes' if self.cfg['resume_audit'] else '⬜ No'}")
+        print("-" * 100)
+        print(f"🔌 Modules:")
+
+        for v in self.validators:
+            print(f"   • {v.name:<15} {'✅ ON' if v.enabled else '⬜ OFF'}")
+
+        print("\n")
+
+        # Секция модулей (валидаторов)
+        print(f"🔌 Modules Status:")
+        for v in self.validators:
+            # Определяем статус на основе конфига
+            status = "✅ ON" if v.enabled else "⬜ OFF"
+            
+            # Добавляем лимиты символов для AI моделей в скобках
+            extra = ""
+            if "Gemini" in v.name:
+                extra = f" ({self.cfg['gemini_max_chars']} chars)"
+            elif "Grok" in v.name:
+                extra = f" ({self.cfg['grok_limit']} chars)"
+                
+            print(f"   • {v.name:<15} {status}{extra}")
+            
+        print("="*100 + "\n")
+
+    def scan(self) -> List[str]:
+        files_to_check = []
+        ext_map = {
+            'html': ['.html'],
+            'css': ['.css', '.scss', '.sass'],
+            'js': ['.js', '.jsx', '.ts', '.tsx']
+        }
+        
+        for root, _, files in os.walk(self.cfg['src']):
+            for f in files:
+                ext = os.path.splitext(f)[1].lower()
+                path = os.path.join(root, f)
+                if ext in ext_map['html'] and self.cfg['filter_html']: files_to_check.append(path)
+                elif ext in ext_map['css'] and self.cfg['filter_css']: files_to_check.append(path)
+                elif ext in ext_map['js'] and self.cfg['filter_js']: files_to_check.append(path)
+        return files_to_check
+
+    def restore_state(self) -> List[FileReport]:
+        if os.path.exists(self.temp_file):
+            try:
+                with open(self.temp_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    # Используем .get для checked_by для совместимости со старыми файлами
+                    return [FileReport(
+                        path=r['path'], 
+                        timestamp=r['timestamp'], 
+                        issues=[Issue(**i) for i in r['issues']],
+                        checked_by=r.get('checked_by', [])
+                    ) for r in data]
+            except Exception as e:
+                logger.warning(f"\n   Resume failed: {e}")
+        return []
+    
+    def save_state(self):
+        temp_shadow = self.temp_file + ".tmp"
+        try:
+            with open(temp_shadow, 'w', encoding='utf-8') as f:
+                json.dump([asdict(r) for r in self.reports], f, ensure_ascii=False, indent=2)
+            if os.path.exists(temp_shadow):
+                os.replace(temp_shadow, self.temp_file)
+        except Exception as e:
+            logger.error(f"\n   State save error: {e}")
+
+    def run(self):
+        print(f"\n💾 ЗАПУСК CODE AUDITOR PRO...")
+        self.print_config()
+        
+        all_files = self.scan()
+        if not all_files:
+            print(f"⚠️ Файлы не найдены.")
+            return
+
+        # Resume Logic
+        if self.cfg['resume_audit']:
+            self.reports = self.restore_state()
+            processed_paths = {r.path for r in self.reports}
+            if processed_paths:
+                print(f"🔄 Resume: {len(processed_paths)} файлов загружено из кэша.")
+        else:
+            self.reports = []
+            processed_paths = set()
+
+        queue = [f for f in all_files if f not in processed_paths]
+        total_q = len(queue)
+        print(f"📊 Очередь: {total_q} файлов.")
+
+        # Указываем желаемую ширину колонки для имени файла 
+        FILENAME_WIDTH = 70
+        
+        for idx, path in enumerate(queue, 1):
+            filename = os.path.basename(path)
+            
+            # Если имя файла слишком длинное, обрезаем его и добавляем многоточие
+            if len(filename) > FILENAME_WIDTH:
+                display_name = filename[:FILENAME_WIDTH-3] + "..."
+            else:
+                # Дополняем точками до фиксированной ширины
+                display_name = filename.ljust(FILENAME_WIDTH, ".")
+
+            print(f"👉 [{idx:>3}/{total_q:<3}] {display_name} ", end="", flush=True)
+            
+            file_issues = []
+            checked_by_modules = [] # Кто реально проверил этот файл
+            api_called = False
+            
+            try:
+                with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                
+                if not content.strip():
+                    print(" ⏩ Empty (Skipped)")
+                    self.reports.append(FileReport(path, datetime.now().strftime("%H:%M"), [], []))
+                    self.save_state()
+                    continue
+
+                ext = os.path.splitext(path)[1].lower()
+                
+                # 1. Проверяем, остались ли живые валидаторы вообще
+                alive_any = any(v.enabled for v in self.validators)
+                if not alive_any:
+                    print("\n\n❌ КРИТИЧЕСКАЯ ОШИБКА: Все API заблокированы или исчерпаны.")
+                    print("🏁 Досрочное завершение. Сохранение отчета...")
+                    break # Выход из цикла файлов (переход к генерации отчета)
+                
+                for validator in self.validators:
+                    # 2. Проверяем включен ли он (is_banned переключает enabled в False)
+                    if validator.enabled and validator.can_check(ext):
+                        # 1. Сразу печатаем, что модуль начал работу
+                        print(f"[{validator.short_name}..", end="", flush=True)
+                        
+                        try:
+                            checked_by_modules.append(validator.short_name)
+                            issues = validator.check(path, content, ext)
+                            if issues:
+                                file_issues.extend(issues)
+                            api_called = True
+                            # 2. Печатаем "ок", если всё прошло успешно
+                            print("ok] ", end="", flush=True)
+                        except APIBannedException:
+                            # Модуль только что себя отключил, переходим к следующему в этом файле
+                            continue
+                        except Exception as ve:
+                            # print() # Принудительный переход на новую строку
+                            # old code logger.error(f"\n   Error {validator.name}: {ve}")
+                            
+                             # 3. Печатаем "err", если модуль упал (теперь ты увидишь это сразу)
+                            print("   err] ", end="", flush=True)
+                            # Добавляем переход на новую строку для логгера, чтобы не ломать вывод
+                            print() 
+                            logger.error(f"  ❌ Ошибка {validator.name}: {ve}")
+                            
+
+                # Сохраняем отчет (Clean, Dirty или Not Checked)
+                new_report = FileReport(
+                    path=path, 
+                    timestamp=datetime.now().strftime("%H:%M"), 
+                    issues=file_issues,
+                    checked_by=checked_by_modules # <-- Сохраняем покрытие
+                )
+                self.reports.append(new_report)
+                self.save_state()
+                
+                # Вывод статуса в консоль
+                if not checked_by_modules:
+                    print(" ⚪ Not Checked (No active validators)")
+                elif not file_issues:
+                    print(f" ✅ Clean [{', '.join(checked_by_modules)}]")
+                else:
+                    # Резервируем 3 символа под число ошибок, чтобы текст 'issues' не съезжал
+                    print(f" ⚠️ {len(file_issues):>3} issues")
+                    
+                if api_called:
+                    # Читаем конфигурацию и очищаем от лишних символов
+                    sleep_cfg = str(self.cfg['api_sleep']).replace(" ", "").replace("\xa0", "")
+                    
+                    if "," in sleep_cfg:
+                        try:
+                            # Парсим диапазон (например, "3,7")
+                            mn, mx = map(float, sleep_cfg.split(","))
+                            st = random.uniform(mn, mx)
+                        except Exception: 
+                            st = 10.0
+                    else:
+                        try:
+                            st = float(sleep_cfg)
+                        except:
+                            st = 10.0
+
+                    # Живой обратный отсчет в одной строке
+                    for remaining in range(int(st), 0, -1):
+                        # \r возвращает курсор в начало строки, flush=True принудительно выводит текст
+                        print(f" ⏳ Ожидание: {remaining}s...   ", end="\r", flush=True)
+                        time.sleep(1)
+                    
+                    # Полная очистка строки перед переходом к следующему файлу
+                    print(" " * 40, end="\r")
+
+            except Exception as e:
+                print(f" ❌ Fatal Error: {e}")
+
+
+        self.generate_report()
+        
+        if os.path.exists(self.temp_file):
+            try:
+                os.remove(self.temp_file)
+            except: pass
+
+    def generate_report(self):
+        """Генерация профессионального отчета с дизайном"""
+        
+        # Статистика
+        stats = {
+            'total': len(self.reports),
+            'dirty': 0,
+            'clean': 0,
+            'skipped': 0, # Не проверялись
+            'errors': 0,
+            'warnings': 0
+        }
+        
+        active_tools = [v.short_name for v in self.validators if v.enabled]
+
+        for r in self.reports:
+            if not r.checked_by:
+                stats['skipped'] += 1
+            elif r.issues:
+                stats['dirty'] += 1
+                for i in r.issues:
+                    if i.type == 'error': stats['errors'] += 1
+                    else: stats['warnings'] += 1
+            else:
+                stats['clean'] += 1
+
+        # CSS Styles (Corporate Design)
+        style = """
+            :root { 
+                --bg-body: #f8fafc; --bg-card: #ffffff; 
+                --text-main: #334155; --text-muted: #64748b;
+                --color-success: #10b981; --color-danger: #ef4444; 
+                --color-warning: #f59e0b; --color-info: #3b82f6;
+                --color-neutral: #94a3b8;
+                --border: #e2e8f0;
+            }
+            body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg-body); color: var(--text-main); margin: 0; padding: 40px; line-height: 1.5; }
+            .container { max-width: 1200px; margin: 0 auto; }
+            
+            /* Header */
+            .header { background: #1e293b; color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+            .header h1 { margin: 0; font-size: 1.5rem; letter-spacing: 0.5px; }
+            .header-meta { text-align: right; font-size: 0.9rem; color: #94a3b8; }
+            .active-tools span { background: #334155; padding: 4px 10px; border-radius: 4px; font-weight: bold; color: #60a5fa; margin-left: 5px; font-size: 0.8rem; }
+            .no-tools { color: #f87171; font-weight: bold; }
+
+            /* Stats Grid */
+            .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 40px; }
+            .stat-card { background: var(--bg-card); padding: 20px; border-radius: 10px; border: 1px solid var(--border); text-align: center; }
+            .stat-val { font-size: 2.2rem; font-weight: 700; display: block; margin-bottom: 5px; }
+            .stat-label { color: var(--text-muted); font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px; }
+            
+            /* File List */
+            .file-block { background: var(--bg-card); border-radius: 8px; margin-bottom: 16px; border: 1px solid var(--border); overflow: hidden; }
+            
+            /* Status Indicators */
+            .file-header { padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; background: #f1f5f9; font-weight: 600; font-size: 0.95rem; }
+            .st-clean { border-left: 5px solid var(--color-success); }
+            .st-dirty { border-left: 5px solid var(--color-danger); }
+            .st-skipped { border-left: 5px solid var(--color-neutral); background: #f8fafc; color: var(--text-muted); }
+            
+            /* Общие стили бейджей */
+            .badge { 
+                padding: 4px 10px; 
+                border-radius: 4px; 
+                font-size: 0.75rem; 
+                font-weight: bold; 
+                text-transform: uppercase; 
+                color: white; 
+                margin-left: 8px;
+                display: inline-block;
+            }
+            
+            /* Цвета инструментов (Матрица ответственности) */
+            .bdg-tool  { background: #94a3b8; }
+            .bdg-grok  { background: #000000; border: 1px solid #444; } /* Черный для Grok */
+            .bdg-ai    { background: #8b5cf6; } /* Фиолетовый для Gemini */
+            .bdg-w3c   { background: #0284c7; } /* Синий для W3C */
+            
+            /* Цвета статусов файла */
+            .bdg-clean { background: #10b981; }
+            .bdg-dirty { background: #ef4444; }
+            .bdg-skipped { background: #64748b; text-decoration: line-through; }
+
+            /* Issues */
+            .issues-list { border-top: 1px solid var(--border); }
+            .issue-row { padding: 12px 20px; display: flex; gap: 15px; border-bottom: 1px solid #f1f5f9; align-items: flex-start; }
+            .issue-row:last-child { border-bottom: none; }
+            
+            .severity { padding: 4px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: 800; min-width: 80px; text-align: center; }
+            .sv-error { background: #fee2e2; color: #ef4444; }
+            .sv-warning { background: #fef3c7; color: #d97706; }
+            .sv-suggestion { background: #dbeafe; color: #2563eb; }
+            
+            .line-num { font-family: monospace; color: var(--text-muted); font-weight: bold; min-width: 40px; }
+            .msg-content { flex-grow: 1; }
+            .fix-box { margin-top: 8px; background: #f8fafc; border-left: 3px solid var(--color-info); padding: 8px 12px; font-size: 0.9rem; color: #334155; }
+            .src-tag { font-size: 0.75rem; background: #f1f5f9; padding: 2px 6px; border-radius: 4px; color: #94a3b8; margin-left: auto; }
+        """
+
+        html = f"""
+        <!DOCTYPE html>
+        <html lang="ru">
+        <head>
+            <meta charset="UTF-8">
+            <title>Code Audit Report</title>
+            <style>{style}</style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <div>
+                        <h1>🛡️ Code Security & Quality Audit</h1>
+                        <div class="active-tools" style="margin-top:5px;">
+                            Enabled Modules: 
+                            {f"{''.join([f'<span>{t}</span>' for t in active_tools])}" if active_tools else '<span class="no-tools">⚠️ ALL MODULES DISABLED</span>'}
+                        </div>
+                    </div>
+                    <div class="header-meta">
+                        <div>Date: {datetime.now().strftime("%Y-%m-%d %H:%M")}</div>
+                        <div>Source: {self.cfg['src']}</div>
+                    </div>
+                </div>
+
+                <div class="stats">
+                    <div class="stat-card">
+                        <span class="stat-val">{stats['total']}</span>
+                        <span class="stat-label">Total Files</span>
+                    </div>
+                    <div class="stat-card" style="border-bottom: 4px solid var(--color-success)">
+                        <span class="stat-val" style="color:var(--color-success)">{stats['clean']}</span>
+                        <span class="stat-label">Passed</span>
+                    </div>
+                    <div class="stat-card" style="border-bottom: 4px solid var(--color-danger)">
+                        <span class="stat-val" style="color:var(--color-danger)">{stats['dirty']}</span>
+                        <span class="stat-label">Issues Found</span>
+                    </div>
+                    <div class="stat-card" style="border-bottom: 4px solid var(--color-neutral)">
+                        <span class="stat-val" style="color:var(--color-neutral)">{stats['skipped']}</span>
+                        <span class="stat-label">Not Checked</span>
+                    </div>
+                </div>
+        """
+        
+        # Сортировка: Сначала Ошибки, потом Clean, в самом низу Not Checked
+        def sort_key(report):
+            if not report.checked_by: return 3 # Not Checked -> вниз
+            if report.issues: return 1         # Dirty -> вверх
+            return 2                           # Clean -> середина
+            
+        self.reports.sort(key=sort_key)
+
+        for rep in self.reports:
+            # 1. ГЕНЕРАЦИЯ ЦВЕТНЫХ БЕЙДЖИКОВ ИНСТРУМЕНТОВ
+            # Теперь инструменты будут цветными всегда (и в CLEAN, и в ISSUES)
+            tool_badges_html = ""
+            if rep.checked_by:
+                badges_list = []
+                for tool_name in rep.checked_by:
+                    css_class = "bdg-tool" # Дефолтный серый
+                    
+                    tool_upper = tool_name.upper()
+                    if "GROK" in tool_upper: css_class = "bdg-grok"
+                    elif "AI" in tool_upper or "GEMINI" in tool_upper: css_class = "bdg-ai"
+                    elif "W3C" in tool_upper: css_class = "bdg-w3c"
+                    else: css_class = "bdg-tool"
+                    badges_list.append(f'<span class="badge {css_class}">{tool_name}</span>')
+                tool_badges_html = "".join(badges_list)
+
+            # 2. ОПРЕДЕЛЕНИЕ СТАТУСА ФАЙЛА
+            if not rep.checked_by:
+                status_cls = "st-skipped"
+                badge_html = '<span class="badge bdg-skipped">NOT CHECKED</span>'
+            elif not rep.issues:
+                status_cls = "st-clean"
+                badge_html = '<span class="badge bdg-clean">CLEAN</span>'
+            else:
+                status_cls = "st-dirty"
+                badge_html = f'<span class="badge bdg-dirty">{len(rep.issues)} ISSUES</span>'
+
+            # 3. ШАПКА БЛОКА ФАЙЛА
+            html += f"""
+            <div class="file-block">
+                <div class="file-header {status_cls}">
+                    <span style="font-family:monospace; font-size:1rem;">{rep.path}</span>
+                    <div class="badges">
+                        {tool_badges_html} {badge_html}
+                    </div>
+                </div>
+            """
+            
+            # 4. СПИСОК ОШИБОК (Блок, который был "похерен" во втором цикле)
+            if rep.issues:
+                html += '<div class="issues-list">'
+                # Сортировка проблем по тяжести (Error -> Warning -> Suggestion)
+                rep.issues.sort(key=lambda x: {'error': 0, 'warning': 1, 'suggestion': 2}.get(x.type, 3))
+                
+                for i in rep.issues:
+                    html += f"""
+                    <div class="issue-row">
+                        <span class="severity sv-{i.type}">{i.type}</span>
+                        <span class="line-num">L:{i.line}</span>
+                        <div class="msg-content">
+                            <div>{i.message}</div>
+                            {f'<div class="fix-box">💡 {i.suggestion}</div>' if i.suggestion else ''}
+                        </div>
+                        <span class="src-tag">{i.source}</span>
+                    </div>
+                    """
+                html += '</div>' # Закрытие issues-list
+            
+            html += "</div>" # Закрытие последнего file-block внутри цикла
+        
+        # Конец основного цикла
+        html += """
+                </div> </body>
+        </html>
+        """
+        
+        with open("code_auditor_report.html", "w", encoding="utf-8") as f:
+            f.write(html)
+        
+        print(f"\n✨ ОТЧЕТ СГЕНЕРИРОВАН: code_auditor_report.html")
+
+import time
+import sys
+
+# =================  AppConsole ==========================
+class AppConsole:
+    """Класс для управления выводом твоего скрипта"""
+    
+    @staticmethod
+    def countdown(seconds, msg="Ожидание"):
+        try:
+            for i in range(seconds, 0, -1):
+                # Печатаем с возвратом каретки (\r)
+                sys.stdout.write(f"\r   [ {msg}: {i}с ]   ")
+                sys.stdout.flush()
+                time.sleep(1)
+            # Стираем строку после окончания
+            sys.stdout.write("\r" + " " * 50 + "\r")
+            sys.stdout.flush()
+        except KeyboardInterrupt:
+            sys.stdout.write("\n   Прервано пользователем.\n")
+
+    @staticmethod
+    def info(text):
+        print(f"  ℹ️  {text}")
+
+    @staticmethod
+    def error(text):
+        print(f"  ❌  {text}")
+
+    @staticmethod
+    def success(text):
+        print(f"  ✅  {text}")
+
+# Пример вызова:
+# AppConsole.countdown(10, "Ротация ключа")
+
+if __name__ == "__main__":
+    AuditEngine().run()
+    
